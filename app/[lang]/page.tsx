@@ -1,4 +1,5 @@
 "use client"
+import Image from "next/image"
 import { usePathname, useRouter } from "next/navigation"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { DrawIoEmbed } from "react-drawio"
@@ -194,6 +195,16 @@ export default function Home() {
 
     return (
         <div className="h-screen bg-background relative overflow-hidden">
+            <div className="absolute top-2 left-2 z-50 pointer-events-none select-none opacity-90 hover:opacity-100 transition-opacity">
+                <Image
+                    src="/logo.png"
+                    alt="Logo"
+                    width={140}
+                    height={40}
+                    className="object-contain drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]"
+                    priority
+                />
+            </div>
             <ResizablePanelGroup
                 id="main-panel-group"
                 direction={isMobile ? "vertical" : "horizontal"}
