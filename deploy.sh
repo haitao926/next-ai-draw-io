@@ -87,18 +87,18 @@ deploy_remote() {
     fi
 
     info "🌐 正在部署到 ${host}:${path} ..."
-    ssh "${host}" "REMOTE_PATH='${path}' REMOTE_REPO='${REMOTE_REPO}' BRANCH='${BRANCH}' PORT='${PORT}' bash -s <<REMOTE_SCRIPT
+    ssh "${host}" "REMOTE_PATH='${path}' REMOTE_REPO='${REMOTE_REPO}' BRANCH='${BRANCH}' PORT='${PORT}' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
-if [ ! -d \"${REMOTE_PATH}\" ]; then
-  mkdir -p \"${REMOTE_PATH}\"
+if [ ! -d "${REMOTE_PATH}" ]; then
+  mkdir -p "${REMOTE_PATH}"
 fi
-if [ ! -d \"${REMOTE_PATH}/.git\" ]; then
-  git clone \"${REMOTE_REPO}\" \"${REMOTE_PATH}\"
+if [ ! -d "${REMOTE_PATH}/.git" ]; then
+  git clone "${REMOTE_REPO}" "${REMOTE_PATH}"
 fi
-cd \"${REMOTE_PATH}\"
-git fetch origin \"${BRANCH}\"
-git checkout \"${BRANCH}\"
-git reset --hard \"origin/${BRANCH}\"
+cd "${REMOTE_PATH}"
+git fetch origin "${BRANCH}"
+git checkout "${BRANCH}"
+git reset --hard "origin/${BRANCH}"
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   docker compose pull || true
@@ -107,10 +107,10 @@ else
   npm install --omit=dev
   npm run build
   # 若有进程管理器可替换此处为 pm2/systemd 等
-  pkill -f \"npm start -- -p ${PORT}\" >/dev/null 2>&1 || true
-  PORT=${PORT} nohup npm start -- -p \"${PORT}\" >/tmp/next-ai-draw-io.log 2>&1 &
+  pkill -f "npm start -- -p ${PORT}" >/dev/null 2>&1 || true
+  PORT=${PORT} nohup npm start -- -p "${PORT}" >/tmp/next-ai-draw-io.log 2>&1 &
 fi
-REMOTE_SCRIPT"
+REMOTE_SCRIPT
     success "✅ ${host} 部署完成"
   done
 }
