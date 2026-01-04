@@ -18,6 +18,12 @@ REMOTE_SERVERS=(
 )
 # 是否在本机也启动（保持原有行为），设置为 false 则仅推送+远程部署
 LOCAL_START=${LOCAL_START:-true}
+# 远程是否使用 Docker Compose，设为 false 将直接 npm 构建/启动
+USE_DOCKER=${USE_DOCKER:-true}
+# 跳过本地安装/构建（已构建过可以设 true 加速）
+SKIP_LOCAL_BUILD=${SKIP_LOCAL_BUILD:-false}
+# 跳过自动提交/推送（手工推送后可设 true）
+SKIP_GIT_SYNC=${SKIP_GIT_SYNC:-false}
 
 if [ -z "${REMOTE_REPO}" ]; then
   echo -e "${RED}❌ 未检测到 git 远程仓库，请先配置 origin 地址${NC}"
@@ -87,7 +93,7 @@ deploy_remote() {
     fi
 
     info "🌐 正在部署到 ${host}:${path} ..."
-    ssh "${host}" "REMOTE_PATH='${path}' REMOTE_REPO='${REMOTE_REPO}' BRANCH='${BRANCH}' PORT='${PORT}' bash -s" <<'REMOTE_SCRIPT'
+    ssh "${host}" "REMOTE_PATH='${path}' REMOTE_REPO='${REMOTE_REPO}' BRANCH='${BRANCH}' PORT='${PORT}' USE_DOCKER='${USE_DOCKER}' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 if [ ! -d "${REMOTE_PATH}" ]; then
   mkdir -p "${REMOTE_PATH}"
@@ -100,15 +106,18 @@ git fetch origin "${BRANCH}"
 git checkout "${BRANCH}"
 git reset --hard "origin/${BRANCH}"
 
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+if [ "${USE_DOCKER}" = "true" ] && command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   docker compose pull || true
   docker compose up -d --build
-else
+elif command -v npm >/dev/null 2>&1; then
   npm install --omit=dev
   npm run build
   # 若有进程管理器可替换此处为 pm2/systemd 等
   pkill -f "npm start -- -p ${PORT}" >/dev/null 2>&1 || true
   PORT=${PORT} nohup npm start -- -p "${PORT}" >/tmp/next-ai-draw-io.log 2>&1 &
+else
+  echo "未检测到 docker compose 或 npm，无法部署。请在服务器安装 Docker(推荐) 或 Node.js/npm。"
+  exit 1
 fi
 REMOTE_SCRIPT
     success "✅ ${host} 部署完成"
@@ -117,12 +126,23 @@ REMOTE_SCRIPT
 
 main() {
   ensure_env
-  install_deps
-  build_app
-  git_sync
+
+  if [ "${SKIP_LOCAL_BUILD}" = "true" ]; then
+    warn "ℹ️  已设置 SKIP_LOCAL_BUILD=true，跳过本地安装/构建"
+  else
+    install_deps
+    build_app
+  fi
+
+  if [ "${SKIP_GIT_SYNC}" = "true" ]; then
+    warn "ℹ️  已设置 SKIP_GIT_SYNC=true，跳过自动提交/推送"
+  else
+    git_sync
+  fi
+
   deploy_remote
 
-  if [ "${LOCAL_START}" = "true" ]; then
+  if [ "${LOCAL_START}" = "true" ] && [ "${SKIP_LOCAL_BUILD}" != "true" ]; then
     start_local
   else
     success "✅ 本地构建完成，已推送并完成远程部署（未本地启动）"
