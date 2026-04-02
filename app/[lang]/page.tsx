@@ -1,11 +1,10 @@
 "use client"
 import Image from "next/image"
 import { usePathname, useRouter } from "next/navigation"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { DrawIoEmbed } from "react-drawio"
 import type { ImperativePanelHandle } from "react-resizable-panels"
 import ChatPanel from "@/components/chat-panel"
-import { STORAGE_CLOSE_PROTECTION_KEY } from "@/components/settings-dialog"
 import {
     ResizableHandle,
     ResizablePanel,
@@ -13,19 +12,15 @@ import {
 } from "@/components/ui/resizable"
 import { useDiagram } from "@/contexts/diagram-context"
 import { i18n, type Locale } from "@/lib/i18n/config"
-
-const drawioBaseUrl =
-    process.env.NEXT_PUBLIC_DRAWIO_BASE_URL || "https://embed.diagrams.net"
+import { isIndexedDBUsable } from "@/lib/session-storage"
 
 export default function Home() {
     const {
         drawioRef,
         handleDiagramExport,
+        handleDiagramAutoSave,
         onDrawioLoad,
         resetDrawioReady,
-        saveDiagramToStorage,
-        showSaveDialog,
-        setShowSaveDialog,
     } = useDiagram()
     const router = useRouter()
     const pathname = usePathname()
@@ -37,32 +32,15 @@ export default function Home() {
     const [darkMode, setDarkMode] = useState(false)
     const [isLoaded, setIsLoaded] = useState(false)
     const [isDrawioReady, setIsDrawioReady] = useState(false)
-    const [closeProtection, setCloseProtection] = useState(false)
+    const [isElectron, setIsElectron] = useState(false)
+    const [canPersist, setCanPersist] = useState(false)
+    const [canPersistChecked, setCanPersistChecked] = useState(false)
+    const [drawioBaseUrl, setDrawioBaseUrl] = useState(
+        process.env.NEXT_PUBLIC_DRAWIO_BASE_URL || "https://embed.diagrams.net",
+    )
 
     const chatPanelRef = useRef<ImperativePanelHandle>(null)
-    const isSavingRef = useRef(false)
-    const mouseOverDrawioRef = useRef(false)
     const isMobileRef = useRef(false)
-
-    // Reset saving flag when dialog closes (with delay to ignore lingering save events from draw.io)
-    useEffect(() => {
-        if (!showSaveDialog) {
-            const timeout = setTimeout(() => {
-                isSavingRef.current = false
-            }, 1000)
-            return () => clearTimeout(timeout)
-        }
-    }, [showSaveDialog])
-
-    // Handle save from draw.io's built-in save button
-    // Note: draw.io sends save events for various reasons (focus changes, etc.)
-    // We use mouse position to determine if the user is interacting with draw.io
-    const handleDrawioSave = useCallback(() => {
-        if (!mouseOverDrawioRef.current) return
-        if (isSavingRef.current) return
-        isSavingRef.current = true
-        setShowSaveDialog(true)
-    }, [setShowSaveDialog])
 
     // Load preferences from localStorage after mount
     useEffect(() => {
@@ -96,13 +74,22 @@ export default function Home() {
             document.documentElement.classList.toggle("dark", prefersDark)
         }
 
-        const savedCloseProtection = localStorage.getItem(
-            STORAGE_CLOSE_PROTECTION_KEY,
-        )
-        if (savedCloseProtection === "true") {
-            setCloseProtection(true)
+        // Detect Electron and use bundled draw.io files for offline use
+        // Note: react-drawio uses `new URL(baseUrl)` so we need absolute URL
+        // Include /index.html because Next.js doesn't auto-serve index.html for directories
+        const electronDetected =
+            !process.env.NEXT_PUBLIC_DRAWIO_BASE_URL &&
+            !!(window as unknown as { electronAPI?: unknown }).electronAPI
+        if (electronDetected) {
+            setIsElectron(true)
+            setDrawioBaseUrl(`${window.location.origin}/drawio/index.html`)
         }
 
+        void (async () => {
+            const usable = await isIndexedDBUsable()
+            setCanPersist(usable)
+            setCanPersistChecked(true)
+        })()
         setIsLoaded(true)
     }, [pathname, router])
 
@@ -111,8 +98,18 @@ export default function Home() {
         onDrawioLoad()
     }, [onDrawioLoad])
 
-    const handleDarkModeChange = async () => {
-        await saveDiagramToStorage()
+    const handleDrawioAutoSave = useCallback(
+        (data: { xml?: string }) => {
+            handleDiagramAutoSave(data)
+            // Only suppress modified state when persistence is available
+            if (canPersist) {
+                drawioRef.current?.status({ message: "", modified: false })
+            }
+        },
+        [canPersist, drawioRef, handleDiagramAutoSave],
+    )
+
+    const handleDarkModeChange = () => {
         const newValue = !darkMode
         setDarkMode(newValue)
         localStorage.setItem("next-ai-draw-io-dark-mode", String(newValue))
@@ -121,8 +118,7 @@ export default function Home() {
         resetDrawioReady()
     }
 
-    const handleDrawioUiChange = async () => {
-        await saveDiagramToStorage()
+    const handleDrawioUiChange = () => {
         const newUi = drawioUi === "min" ? "sketch" : "min"
         localStorage.setItem("drawio-theme", newUi)
         setDrawioUi(newUi)
@@ -130,7 +126,7 @@ export default function Home() {
         resetDrawioReady()
     }
 
-    // Check mobile - save diagram and reset draw.io before crossing breakpoint
+    // Check mobile - reset draw.io before crossing breakpoint
     const isInitialRenderRef = useRef(true)
     useEffect(() => {
         const checkMobile = () => {
@@ -139,7 +135,6 @@ export default function Home() {
                 !isInitialRenderRef.current &&
                 newIsMobile !== isMobileRef.current
             ) {
-                saveDiagramToStorage().catch(() => {})
                 setIsDrawioReady(false)
                 resetDrawioReady()
             }
@@ -151,7 +146,7 @@ export default function Home() {
         checkMobile()
         window.addEventListener("resize", checkMobile)
         return () => window.removeEventListener("resize", checkMobile)
-    }, [saveDiagramToStorage, resetDrawioReady])
+    }, [resetDrawioReady])
 
     const toggleChatPanel = () => {
         const panel = chatPanelRef.current
@@ -179,20 +174,6 @@ export default function Home() {
         return () => window.removeEventListener("keydown", handleKeyDown)
     }, [])
 
-    // Show confirmation dialog when user tries to leave the page
-    useEffect(() => {
-        if (!closeProtection) return
-
-        const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-            event.preventDefault()
-            return ""
-        }
-
-        window.addEventListener("beforeunload", handleBeforeUnload)
-        return () =>
-            window.removeEventListener("beforeunload", handleBeforeUnload)
-    }, [closeProtection])
-
     return (
         <div className="h-screen bg-background relative overflow-hidden">
             <div className="absolute top-2 left-2 z-50 pointer-events-none select-none opacity-90 hover:opacity-100 transition-opacity">
@@ -219,33 +200,43 @@ export default function Home() {
                         className={`h-full relative ${
                             isMobile ? "p-1" : "p-2"
                         }`}
-                        onMouseEnter={() => {
-                            mouseOverDrawioRef.current = true
-                        }}
-                        onMouseLeave={() => {
-                            mouseOverDrawioRef.current = false
-                        }}
                     >
                         <div className="h-full rounded-xl overflow-hidden shadow-soft-lg border border-border/30 relative">
-                            {isLoaded && (
+                            {isLoaded && canPersistChecked && (
                                 <div
                                     className={`h-full w-full ${isDrawioReady ? "" : "invisible absolute inset-0"}`}
                                 >
                                     <DrawIoEmbed
-                                        key={`${drawioUi}-${darkMode}-${currentLang}`}
+                                        key={`${drawioUi}-${darkMode}-${currentLang}-${isElectron}`}
                                         ref={drawioRef}
+                                        autosave
+                                        onAutoSave={handleDrawioAutoSave}
                                         onExport={handleDiagramExport}
                                         onLoad={handleDrawioLoad}
-                                        onSave={handleDrawioSave}
                                         baseUrl={drawioBaseUrl}
+                                        configuration={
+                                            canPersist
+                                                ? { confirmExit: false }
+                                                : undefined
+                                        }
                                         urlParameters={{
                                             ui: drawioUi,
                                             spin: false,
                                             libraries: false,
+                                            // Disable modified tracking only when persistence is available
+                                            ...(canPersist && {
+                                                modified: false,
+                                                keepmodified: false,
+                                            }),
                                             saveAndExit: false,
+                                            noSaveBtn: true,
                                             noExitBtn: true,
                                             dark: darkMode,
                                             lang: currentLang,
+                                            // Enable offline mode in Electron to disable external service calls
+                                            ...(isElectron && {
+                                                offline: true,
+                                            }),
                                         }}
                                     />
                                 </div>
@@ -277,16 +268,23 @@ export default function Home() {
                     onExpand={() => setIsChatVisible(true)}
                 >
                     <div className={`h-full ${isMobile ? "p-1" : "py-2 pr-2"}`}>
-                        <ChatPanel
-                            isVisible={isChatVisible}
-                            onToggleVisibility={toggleChatPanel}
-                            drawioUi={drawioUi}
-                            onToggleDrawioUi={handleDrawioUiChange}
-                            darkMode={darkMode}
-                            onToggleDarkMode={handleDarkModeChange}
-                            isMobile={isMobile}
-                            onCloseProtectionChange={setCloseProtection}
-                        />
+                        <Suspense
+                            fallback={
+                                <div className="h-full bg-card rounded-xl border border-border/30 flex items-center justify-center text-muted-foreground">
+                                    Loading chat...
+                                </div>
+                            }
+                        >
+                            <ChatPanel
+                                isVisible={isChatVisible}
+                                onToggleVisibility={toggleChatPanel}
+                                drawioUi={drawioUi}
+                                onToggleDrawioUi={handleDrawioUiChange}
+                                darkMode={darkMode}
+                                onToggleDarkMode={handleDarkModeChange}
+                                isMobile={isMobile}
+                            />
+                        </Suspense>
                     </div>
                 </ResizablePanel>
             </ResizablePanelGroup>

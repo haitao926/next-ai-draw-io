@@ -19,7 +19,7 @@
 
 AI機能とdraw.ioダイアグラムを統合したNext.jsウェブアプリケーションです。自然言語コマンドとAI支援の可視化により、ダイアグラムを作成、修正、強化できます。
 
-> 注：<img src="https://raw.githubusercontent.com/DayuanJiang/next-ai-draw-io/main/public/doubao-color.png" alt="" height="20" /> [ByteDance Doubao](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project) のご支援により、デモサイトに強力な K2-thinking モデルを導入しました！
+> 注：<img src="https://raw.githubusercontent.com/DayuanJiang/next-ai-draw-io/main/public/doubao-color.png" alt="" height="20" /> [ByteDance Doubao](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio) のご支援により、デモサイトに強力な glm-4.7 モデルを導入しました！
 
 https://github.com/user-attachments/assets/b2eef5f3-b335-4e71-a755-dc2e80931979
 
@@ -37,11 +37,12 @@ https://github.com/user-attachments/assets/b2eef5f3-b335-4e71-a755-dc2e80931979
     - [インストール](#インストール)
   - [デプロイ](#デプロイ)
     - [EdgeOne Pagesへのデプロイ](#edgeone-pagesへのデプロイ)
-    - [Vercelへのデプロイ（推奨）](#vercelへのデプロイ推奨)
+    - [Vercelへのデプロイ](#vercelへのデプロイ)
     - [Cloudflare Workersへのデプロイ](#cloudflare-workersへのデプロイ)
   - [マルチプロバイダーサポート](#マルチプロバイダーサポート)
   - [仕組み](#仕組み)
   - [サポート＆お問い合わせ](#サポートお問い合わせ)
+  - [よくある質問](#よくある質問)
   - [スター履歴](#スター履歴)
 
 ## 例
@@ -180,7 +181,7 @@ npm run dev
 
 また、Tencent EdgeOne Pagesでデプロイすると、[DeepSeekモデルの毎日の無料クォータ](https://pages.edgeone.ai/document/edge-ai)が付与されます。
 
-### Vercelへのデプロイ（推奨）
+### Vercelへのデプロイ
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FDayuanJiang%2Fnext-ai-draw-io)
 
@@ -195,22 +196,28 @@ Next.jsアプリをデプロイする最も簡単な方法は、Next.jsの作成
 
 ## マルチプロバイダーサポート
 
--   [ByteDance Doubao](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project)
+-   [ByteDance Doubao](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio)
 -   AWS Bedrock（デフォルト）
 -   OpenAI
 -   Anthropic
 -   Google AI
+-   Google Vertex AI
 -   Azure OpenAI
 -   Ollama
 -   OpenRouter
 -   DeepSeek
 -   SiliconFlow
+-   ModelScope
 -   SGLang
 -   Vercel AI Gateway
 
 AWS BedrockとOpenRouter以外のすべてのプロバイダーはカスタムエンドポイントをサポートしています。
 
 📖 **[詳細なプロバイダー設定ガイド](./ai-providers.md)** - 各プロバイダーの設定手順をご覧ください。
+
+### サーバーサイドマルチモデル設定
+
+管理者は、ユーザーが個人のAPIキーを提供することなく利用できる複数のサーバーサイドモデルを設定できます。`AI_MODELS_CONFIG` 環境変数（JSON文字列）または `ai-models.json` ファイルで設定します。
 
 **モデル要件**：このタスクは厳密なフォーマット制約（draw.io XML）を持つ長文テキスト生成を伴うため、強力なモデル機能が必要です。Claude Sonnet 4.5、GPT-5.1、Gemini 3 Pro、DeepSeek V3.2/R1を推奨します。
 
@@ -230,13 +237,17 @@ AWS BedrockとOpenRouter以外のすべてのプロバイダーはカスタム�
 
 ## サポート＆お問い合わせ
 
-**デモサイトのAPIトークン使用を支援してくださった[ByteDance Doubao](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project)に特別な感謝を申し上げます！** ARKプラットフォームに登録すると、50万トークンが無料でもらえます！
+**デモサイトのAPIトークン使用を支援してくださった[ByteDance Doubao](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio)に特別な感謝を申し上げます！** ARKプラットフォームに登録すると、50万トークンが無料でもらえます！
 
 このプロジェクトが役に立ったら、ライブデモサイトのホスティングを支援するために[スポンサー](https://github.com/sponsors/DayuanJiang)をご検討ください！
 
 サポートやお問い合わせについては、GitHubリポジトリでissueを開くか、メンテナーにご連絡ください：
 
 -   メール：me[at]jiang.jp
+
+## よくある質問
+
+一般的な問題と解決策については [FAQ](./FAQ.md) をご覧ください。
 
 ## スター履歴
 

@@ -13,7 +13,7 @@ This guide explains how to configure different AI model providers for next-ai-dr
 
 ### Doubao (ByteDance Volcengine)
 
-> **Free tokens**: Register on the [Volcengine ARK platform](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project) to get 500K free tokens for all models!
+> **Free tokens**: Register on the [Volcengine ARK platform](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio) to get 500K free tokens for all models!
 
 ```bash
 DOUBAO_API_KEY=your_api_key
@@ -31,6 +31,21 @@ Optional custom endpoint:
 
 ```bash
 GOOGLE_BASE_URL=https://your-custom-endpoint
+```
+
+### Google Vertex AI (Enterprise GCP)
+
+Google Vertex AI offers enterprise-grade features and data residency. **Express Mode** allows for simple API key authentication, making it compatible with edge runtimes like Vercel and Cloudflare.
+
+```bash
+GOOGLE_VERTEX_API_KEY=your_api_key
+AI_MODEL=gemini-2.0-flash
+```
+
+Optional custom endpoint:
+
+```bash
+GOOGLE_VERTEX_BASE_URL=https://your-custom-endpoint
 ```
 
 ### OpenAI
@@ -158,6 +173,19 @@ Optional custom URL:
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
+### ModelScope
+
+```bash
+MODELSCOPE_API_KEY=your_api_key
+AI_MODEL=Qwen/Qwen3-235B-A22B-Instruct-2507
+```
+
+Optional custom endpoint:
+
+```bash
+MODELSCOPE_BASE_URL=https://your-custom-endpoint
+```
+
 ### Vercel AI Gateway
 
 Vercel AI Gateway provides unified access to multiple AI providers through a single API key. This simplifies authentication and allows you to switch between providers without managing multiple API keys.
@@ -194,6 +222,85 @@ Model format uses `provider/model` syntax:
 
 Get your API key from the [Vercel AI Gateway dashboard](https://vercel.com/ai-gateway).
 
+### MiniMax
+
+MiniMax supports two API formats:
+- **Anthropic-compatible** (`/anthropic` endpoint) — recommended, supports interleaved thinking
+- **OpenAI-compatible** (`/v1` endpoint) — standard OpenAI chat completions format
+
+```bash
+MINIMAX_API_KEY=your_api_key
+AI_MODEL=MiniMax-M2.7
+```
+
+Optional configuration:
+
+```bash
+# China mainland, Anthropic-compatible (default)
+MINIMAX_BASE_URL=https://api.minimaxi.com/anthropic
+
+# China mainland, OpenAI-compatible
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+
+# International, Anthropic-compatible
+MINIMAX_BASE_URL=https://api.minimax.io/anthropic
+
+# International, OpenAI-compatible
+MINIMAX_BASE_URL=https://api.minimax.io/v1
+```
+
+### GLM (Zhipu AI)
+
+```bash
+GLM_API_KEY=your_api_key
+AI_MODEL=glm-4
+```
+
+Optional custom endpoint:
+
+```bash
+GLM_BASE_URL=https://your-custom-endpoint
+```
+
+### Qwen (Alibaba Cloud)
+
+```bash
+QWEN_API_KEY=your_api_key
+AI_MODEL=qwen-turbo
+```
+
+Optional custom endpoint:
+
+```bash
+QWEN_BASE_URL=https://your-custom-endpoint
+```
+
+### Kimi (Moonshot AI)
+
+```bash
+KIMI_API_KEY=your_api_key
+AI_MODEL=kimi-latest
+```
+
+Optional custom endpoint:
+
+```bash
+KIMI_BASE_URL=https://your-custom-endpoint
+```
+
+### Qiniu (Qiniu Cloud)
+
+```bash
+QINIU_API_KEY=your_api_key
+AI_MODEL=your_model_id
+```
+
+Optional custom endpoint:
+
+```bash
+QINIU_BASE_URL=https://your-custom-endpoint
+```
+
 ## Auto-Detection
 
 If you only configure **one** provider's API key, the system will automatically detect and use that provider. No need to set `AI_PROVIDER`.
@@ -201,8 +308,65 @@ If you only configure **one** provider's API key, the system will automatically 
 If you configure **multiple** API keys, you must explicitly set `AI_PROVIDER`:
 
 ```bash
-AI_PROVIDER=google  # or: openai, anthropic, deepseek, siliconflow, doubao, azure, bedrock, openrouter, ollama, gateway, sglang
+AI_PROVIDER=google  # or: openai, anthropic, deepseek, siliconflow, doubao, azure, bedrock, openrouter, ollama, gateway, sglang, modelscope, minimax, glm, qwen, kimi, qiniu
 ```
+
+## Server-Side Multi-Model Configuration
+
+Administrators can configure multiple server-side models that are available to all users without requiring personal API keys.
+
+### Configuration Methods
+
+**Option 1: Environment Variable** (recommended for cloud deployments)
+
+Set `AI_MODELS_CONFIG` as a JSON string:
+
+```bash
+AI_MODELS_CONFIG='{"providers":[{"name":"OpenAI","provider":"openai","models":["gpt-4o"],"default":true}]}'
+```
+
+**Option 2: Config File**
+
+Create an `ai-models.json` file in the project root (or set `AI_MODELS_CONFIG_PATH` to a custom location).
+
+### Example Configuration
+
+```json
+{
+  "providers": [
+    {
+      "name": "OpenAI Production",
+      "provider": "openai",
+      "models": ["gpt-4o", "gpt-4o-mini"],
+      "default": true
+    },
+    {
+      "name": "Custom DeepSeek",
+      "provider": "deepseek",
+      "models": ["deepseek-chat"],
+      "apiKeyEnv": "MY_DEEPSEEK_KEY",
+      "baseUrlEnv": "MY_DEEPSEEK_URL"
+    }
+  ]
+}
+```
+
+### Field Reference
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Display name (supports multiple configs for same provider) |
+| `provider` | Yes | Provider type (`openai`, `anthropic`, `google`, `bedrock`, etc.) |
+| `models` | Yes | List of model IDs |
+| `default` | No | Set to `true` to auto-select this provider's first model as default |
+| `apiKeyEnv` | No | Custom API key env var name (defaults to provider's standard var like `OPENAI_API_KEY`) |
+| `baseUrlEnv` | No | Custom base URL env var name |
+
+### Notes
+
+- API keys and credentials are provided via environment variables. By default, standard var names are used (e.g., `OPENAI_API_KEY`), but you can specify custom var names with `apiKeyEnv`.
+- The `name` field allows multiple configurations for the same provider (e.g., "OpenAI Production" and "OpenAI Staging" both using `provider: "openai"` but with different `apiKeyEnv` values).
+- If config is not present, the app falls back to `AI_PROVIDER`/`AI_MODEL` environment variable configuration.
 
 ## Model Capability Requirements
 

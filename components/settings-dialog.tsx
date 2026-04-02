@@ -1,8 +1,9 @@
 "use client"
 
-import { Github, Info, Moon, Sun, Tag } from "lucide-react"
+import { ChevronRight, Github, Info, Moon, Sun, Tag } from "lucide-react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { Suspense, useEffect, useState } from "react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
     Dialog,
@@ -21,9 +22,11 @@ import {
     SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { useDictionary } from "@/hooks/use-dictionary"
 import { getApiEndpoint } from "@/lib/base-path"
 import { i18n, type Locale } from "@/lib/i18n/config"
+import { STORAGE_KEYS } from "@/lib/storage"
 
 // Reusable setting item component for consistent layout
 function SettingItem({
@@ -54,22 +57,26 @@ const LANGUAGE_LABELS: Record<Locale, string> = {
     en: "English",
     zh: "中文",
     ja: "日本語",
+    "zh-Hant": "繁體中文",
 }
 
 interface SettingsDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
-    onCloseProtectionChange?: (enabled: boolean) => void
     drawioUi: "min" | "sketch"
     onToggleDrawioUi: () => void
     darkMode: boolean
     onToggleDarkMode: () => void
     minimalStyle?: boolean
     onMinimalStyleChange?: (value: boolean) => void
+    vlmValidationEnabled?: boolean
+    onVlmValidationChange?: (value: boolean) => void
+    onOpenModelConfig?: () => void
+    customSystemMessage?: string
+    onCustomSystemMessageChange?: (value: string) => void
 }
 
 export const STORAGE_ACCESS_CODE_KEY = "next-ai-draw-io-access-code"
-export const STORAGE_CLOSE_PROTECTION_KEY = "next-ai-draw-io-close-protection"
 const STORAGE_ACCESS_CODE_REQUIRED_KEY = "next-ai-draw-io-access-code-required"
 
 function getStoredAccessCodeRequired(): boolean | null {
@@ -82,26 +89,35 @@ function getStoredAccessCodeRequired(): boolean | null {
 function SettingsContent({
     open,
     onOpenChange,
-    onCloseProtectionChange,
     drawioUi,
     onToggleDrawioUi,
     darkMode,
     onToggleDarkMode,
     minimalStyle = false,
     onMinimalStyleChange = () => {},
+    vlmValidationEnabled = false,
+    onVlmValidationChange = () => {},
+    onOpenModelConfig,
+    customSystemMessage = "",
+    onCustomSystemMessageChange = () => {},
 }: SettingsDialogProps) {
     const dict = useDictionary()
     const router = useRouter()
     const pathname = usePathname() || "/"
     const search = useSearchParams()
     const [accessCode, setAccessCode] = useState("")
-    const [closeProtection, setCloseProtection] = useState(true)
     const [isVerifying, setIsVerifying] = useState(false)
     const [error, setError] = useState("")
     const [accessCodeRequired, setAccessCodeRequired] = useState(
         () => getStoredAccessCodeRequired() ?? false,
     )
     const [currentLang, setCurrentLang] = useState("en")
+    const [sendShortcut, setSendShortcut] = useState("ctrl-enter")
+
+    // Proxy settings state (Electron only)
+    const [httpProxy, setHttpProxy] = useState("")
+    const [httpsProxy, setHttpsProxy] = useState("")
+    const [isApplyingProxy, setIsApplyingProxy] = useState(false)
 
     useEffect(() => {
         // Only fetch if not cached in localStorage
@@ -143,19 +159,33 @@ function SettingsContent({
                 localStorage.getItem(STORAGE_ACCESS_CODE_KEY) || ""
             setAccessCode(storedCode)
 
-            const storedCloseProtection = localStorage.getItem(
-                STORAGE_CLOSE_PROTECTION_KEY,
+            const storedSendShortcut = localStorage.getItem(
+                STORAGE_KEYS.sendShortcut,
             )
-            // Default to true if not set
-            setCloseProtection(storedCloseProtection !== "false")
+            setSendShortcut(storedSendShortcut || "ctrl-enter")
 
             setError("")
+
+            // Load proxy settings (Electron only)
+            if (window.electronAPI?.getProxy) {
+                window.electronAPI.getProxy().then((config) => {
+                    setHttpProxy(config.httpProxy || "")
+                    setHttpsProxy(config.httpsProxy || "")
+                })
+            }
         }
     }, [open])
 
     const changeLanguage = (lang: string) => {
         // Save locale to localStorage for persistence across restarts
         localStorage.setItem("next-ai-draw-io-locale", lang)
+
+        // Notify Electron main process to update its menu language
+        if (window.electronAPI?.setUserLocale) {
+            window.electronAPI.setUserLocale(lang).catch((error) => {
+                console.error("Failed to sync locale with Electron:", error)
+            })
+        }
 
         const parts = pathname.split("/")
         if (parts.length > 1 && i18n.locales.includes(parts[1] as Locale)) {
@@ -208,8 +238,48 @@ function SettingsContent({
         }
     }
 
+    const handleApplyProxy = async () => {
+        if (!window.electronAPI?.setProxy) return
+
+        // Validate proxy URLs (must start with http:// or https://)
+        const validateProxyUrl = (url: string): boolean => {
+            if (!url) return true // Empty is OK
+            return url.startsWith("http://") || url.startsWith("https://")
+        }
+
+        const trimmedHttp = httpProxy.trim()
+        const trimmedHttps = httpsProxy.trim()
+
+        if (trimmedHttp && !validateProxyUrl(trimmedHttp)) {
+            toast.error("HTTP Proxy must start with http:// or https://")
+            return
+        }
+        if (trimmedHttps && !validateProxyUrl(trimmedHttps)) {
+            toast.error("HTTPS Proxy must start with http:// or https://")
+            return
+        }
+
+        setIsApplyingProxy(true)
+        try {
+            const result = await window.electronAPI.setProxy({
+                httpProxy: trimmedHttp || undefined,
+                httpsProxy: trimmedHttps || undefined,
+            })
+
+            if (result.success) {
+                toast.success(dict.settings.proxyApplied)
+            } else {
+                toast.error(result.error || "Failed to apply proxy settings")
+            }
+        } catch {
+            toast.error("Failed to apply proxy settings")
+        } finally {
+            setIsApplyingProxy(false)
+        }
+    }
+
     return (
-        <DialogContent className="sm:max-w-lg p-0 gap-0">
+        <DialogContent className="sm:max-w-lg p-0 gap-0 max-h-[90vh] flex flex-col overflow-hidden">
             {/* Header */}
             <DialogHeader className="px-6 pt-6 pb-4">
                 <DialogTitle>{dict.settings.title}</DialogTitle>
@@ -219,8 +289,29 @@ function SettingsContent({
             </DialogHeader>
 
             {/* Content */}
-            <div className="px-6 pb-6">
+            <div className="px-6 pb-6 overflow-y-auto flex-1 scrollbar-thin">
                 <div className="divide-y divide-border-subtle">
+                    {/* API Keys & Models */}
+                    {onOpenModelConfig && (
+                        <SettingItem
+                            label={dict.settings.apiKeysModels}
+                            description={dict.settings.apiKeysModelsDescription}
+                        >
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-9 w-9 p-0"
+                                onClick={() => {
+                                    onOpenChange(false)
+                                    onOpenModelConfig()
+                                }}
+                                aria-label={dict.settings.apiKeysModels}
+                            >
+                                <ChevronRight className="h-4 w-4" />
+                            </Button>
+                        </SettingItem>
+                    )}
+
                     {/* Access Code (conditional) */}
                     {accessCodeRequired && (
                         <div className="py-4 first:pt-0 space-y-3">
@@ -333,25 +424,6 @@ function SettingsContent({
                         </Button>
                     </SettingItem>
 
-                    {/* Close Protection */}
-                    <SettingItem
-                        label={dict.settings.closeProtection}
-                        description={dict.settings.closeProtectionDescription}
-                    >
-                        <Switch
-                            id="close-protection"
-                            checked={closeProtection}
-                            onCheckedChange={(checked) => {
-                                setCloseProtection(checked)
-                                localStorage.setItem(
-                                    STORAGE_CLOSE_PROTECTION_KEY,
-                                    checked.toString(),
-                                )
-                                onCloseProtectionChange?.(checked)
-                            }}
-                        />
-                    </SettingItem>
-
                     {/* Diagram Style */}
                     <SettingItem
                         label={dict.settings.diagramStyle}
@@ -370,6 +442,137 @@ function SettingsContent({
                             </span>
                         </div>
                     </SettingItem>
+
+                    {/* VLM Diagram Validation */}
+                    <SettingItem
+                        label={dict.settings.diagramValidation}
+                        description={dict.settings.diagramValidationDescription}
+                    >
+                        <div className="flex items-center gap-2">
+                            <Switch
+                                id="vlm-validation"
+                                checked={vlmValidationEnabled}
+                                onCheckedChange={onVlmValidationChange}
+                            />
+                            <span className="text-sm text-muted-foreground">
+                                {vlmValidationEnabled
+                                    ? dict.settings.enabled
+                                    : dict.settings.disabled}
+                            </span>
+                        </div>
+                    </SettingItem>
+
+                    {/* Custom System Message */}
+                    <div className="py-4 space-y-3">
+                        <div className="space-y-0.5">
+                            <Label
+                                htmlFor="custom-system-message"
+                                className="text-sm font-medium"
+                            >
+                                {dict.settings.customSystemMessage}
+                            </Label>
+                            <p className="text-xs text-muted-foreground">
+                                {dict.settings.customSystemMessageDescription}
+                            </p>
+                        </div>
+                        <Textarea
+                            id="custom-system-message"
+                            value={customSystemMessage}
+                            onChange={(e) =>
+                                onCustomSystemMessageChange(e.target.value)
+                            }
+                            placeholder={
+                                dict.settings.customSystemMessagePlaceholder
+                            }
+                            className="min-h-[80px] max-h-[160px] text-sm"
+                            maxLength={5000}
+                        />
+                    </div>
+
+                    {/* Send Shortcut */}
+                    <SettingItem
+                        label={dict.settings.sendShortcut}
+                        description={dict.settings.sendShortcutDescription}
+                    >
+                        <Select
+                            value={sendShortcut}
+                            onValueChange={(value) => {
+                                setSendShortcut(value)
+                                localStorage.setItem(
+                                    STORAGE_KEYS.sendShortcut,
+                                    value,
+                                )
+                                window.dispatchEvent(
+                                    new CustomEvent("sendShortcutChange", {
+                                        detail: value,
+                                    }),
+                                )
+                            }}
+                        >
+                            <SelectTrigger
+                                id="send-shortcut-select"
+                                className="w-auto h-9 rounded-xl"
+                            >
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="enter">
+                                    {dict.settings.enterToSend}
+                                </SelectItem>
+                                <SelectItem value="ctrl-enter">
+                                    {dict.settings.ctrlEnterToSend}
+                                </SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </SettingItem>
+
+                    {/* Proxy Settings - Electron only */}
+                    {typeof window !== "undefined" &&
+                        window.electronAPI?.isElectron && (
+                            <div className="py-4 space-y-3">
+                                <div className="space-y-0.5">
+                                    <Label className="text-sm font-medium">
+                                        {dict.settings.proxy}
+                                    </Label>
+                                    <p className="text-xs text-muted-foreground">
+                                        {dict.settings.proxyDescription}
+                                    </p>
+                                </div>
+
+                                <div className="space-y-2">
+                                    <Input
+                                        id="http-proxy"
+                                        type="text"
+                                        value={httpProxy}
+                                        onChange={(e) =>
+                                            setHttpProxy(e.target.value)
+                                        }
+                                        placeholder={`${dict.settings.httpProxy}: http://proxy:8080`}
+                                        className="h-9"
+                                    />
+                                    <Input
+                                        id="https-proxy"
+                                        type="text"
+                                        value={httpsProxy}
+                                        onChange={(e) =>
+                                            setHttpsProxy(e.target.value)
+                                        }
+                                        placeholder={`${dict.settings.httpsProxy}: http://proxy:8080`}
+                                        className="h-9"
+                                    />
+                                </div>
+
+                                <Button
+                                    onClick={handleApplyProxy}
+                                    disabled={isApplyingProxy}
+                                    className="h-9 px-4 rounded-xl w-full"
+                                >
+                                    {isApplyingProxy
+                                        ? "..."
+                                        : dict.settings.applyProxy}
+                                </Button>
+                            </div>
+                        )}
                 </div>
             </div>
 

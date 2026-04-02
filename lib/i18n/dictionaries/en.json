@@ -28,12 +28,18 @@
         "azure": "Azure OpenAI",
         "openrouter": "OpenRouter",
         "deepseek": "DeepSeek",
-        "siliconflow": "SiliconFlow"
+        "siliconflow": "SiliconFlow",
+        "modelscope": "ModelScope",
+        "minimax": "MiniMax",
+        "glm": "GLM",
+        "qwen": "Qwen",
+        "kimi": "Kimi",
+        "qiniu": "Qiniu"
     },
     "chat": {
         "placeholder": "Describe your diagram or upload a file...",
         "send": "Send",
-        "sending": "Sending...",
+        "stopGeneration": "Stop generation",
         "sendMessage": "Send message",
         "clearConversation": "Clear conversation",
         "diagramHistory": "Diagram history",
@@ -51,7 +57,8 @@
         "badResponse": "Bad response",
         "clickToEdit": "Click to edit",
         "editMessage": "Edit message",
-        "saveAndSubmit": "Save & Submit"
+        "saveAndSubmit": "Save & Submit",
+        "ExtractURL": "Extract from URL"
     },
     "examples": {
         "title": "Create diagrams with AI",
@@ -75,6 +82,8 @@
     "settings": {
         "title": "Settings",
         "description": "Configure your application settings.",
+        "apiKeysModels": "API Keys & Models",
+        "apiKeysModelsDescription": "Configure AI providers and API keys.",
         "accessCode": "Access Code",
         "accessCodePlaceholder": "Enter access code",
         "accessCodeDescription": "Required to use this application.",
@@ -98,14 +107,29 @@
         "switchTo": "Switch to",
         "minimal": "Minimal",
         "sketch": "Sketch",
-        "closeProtection": "Close Protection",
-        "closeProtectionDescription": "Show confirmation when leaving the page.",
         "diagramStyle": "Diagram Style",
         "diagramStyleDescription": "Toggle between minimal and styled diagram output.",
+        "sendShortcut": "Send Shortcut",
+        "sendShortcutDescription": "Choose how to send messages.",
+        "enterToSend": "Enter to send",
+        "ctrlEnterToSend": "Cmd/Ctrl+Enter to send",
         "diagramActions": "Diagram Actions",
         "diagramActionsDescription": "Manage diagram history and exports",
         "history": "History",
-        "download": "Download"
+        "download": "Download",
+        "proxy": "Proxy Settings",
+        "proxyDescription": "Configure HTTP/HTTPS proxy for API requests (Desktop only)",
+        "httpProxy": "HTTP Proxy",
+        "httpsProxy": "HTTPS Proxy",
+        "applyProxy": "Apply",
+        "proxyApplied": "Proxy settings applied",
+        "diagramValidation": "Diagram Validation (Experimental)",
+        "diagramValidationDescription": "Use a vision language model to validate generated diagrams. Requires a VLM like GPT-5.2 or Sonnet-4.5.",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "customSystemMessage": "Custom System Message",
+        "customSystemMessageDescription": "Add custom instructions appended to the AI's system prompt.",
+        "customSystemMessagePlaceholder": "e.g., Always use blue color scheme for diagrams..."
     },
     "save": {
         "title": "Save Diagram",
@@ -117,7 +141,8 @@
             "drawio": "Draw.io XML",
             "png": "PNG Image",
             "svg": "SVG Image"
-        }
+        },
+        "savedSuccessfully": "Saved successfully!"
     },
     "history": {
         "title": "Diagram History",
@@ -162,8 +187,11 @@
         "tpmMessage": "Too many requests. Please wait a moment.",
         "tpmMessageDetailed": "Rate limit reached ({limit} tokens/min). Please wait {seconds} seconds before sending another request.",
         "messageApi": "Looks like you've reached today's demo limit. We're thrilled you're enjoying it, and while ByteDance Doubao generously sponsors this demo, we've had to set a few boundaries to keep things fair for everyone.",
+        "messageApiSelfHosted": null,
         "messageToken": "Looks like you've reached today's token limit. We're thrilled you're enjoying it, and while ByteDance Doubao generously sponsors this demo, we've had to set a few boundaries to keep things fair for everyone.",
+        "messageTokenSelfHosted": null,
         "tip": "<strong>Tip:</strong> You can use your own API key (click the Settings icon) or self-host the project to bypass these limits.",
+        "tipSelfHosted": "<strong>Tip:</strong> You can configure your own API key in the settings to continue using the service.",
         "reset": "Your limit resets tomorrow. Thanks for understanding.",
         "doubaoSponsorship": "<a href=\"{link}\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"underline hover:text-foreground\">Register here</a> to get 500K free tokens per model (including Doubao, DeepSeek and Kimi), then configure your API key in model settings.",
         "configModel": "Use Your API Key",
@@ -184,6 +212,15 @@
         "reading": "Reading...",
         "chars": "chars",
         "removeFile": "Remove file"
+    },
+    "url": {
+        "title": "Extract Content from URL",
+        "description": "Paste a URL to extract and analyze its content",
+        "Extracting": "Extracting...",
+        "extract": "Extract",
+        "Cancel": "Cancel",
+        "enterUrl": "Please enter a URL",
+        "invalidFormat": "Invalid URL format"
     },
     "reasoning": {
         "thinking": "Thinking...",
@@ -211,6 +248,40 @@
         "seekingSponsorship": "Call for Sponsorship",
         "contactMe": "Contact Me",
         "usageNotice": "Due to high usage, I have changed the model from Claude to minimax-m2 and added some usage limits. See About page for details."
+    },
+    "sessionHistory": {
+        "tooltip": "Chat History",
+        "newChat": "New Chat",
+        "empty": "No chat history yet",
+        "emptyHint": "Start a conversation to begin",
+        "today": "Today",
+        "yesterday": "Yesterday",
+        "thisWeek": "This Week",
+        "earlier": "Earlier",
+        "deleteTitle": "Delete this chat?",
+        "deleteDescription": "This will permanently delete this chat session and its diagram. This action cannot be undone.",
+        "recentChats": "Recent Chats",
+        "justNow": "Just now",
+        "searchPlaceholder": "Search chats...",
+        "noResults": "No chats found"
+    },
+    "validation": {
+        "title": "Validate Diagram",
+        "capturing": "Capturing",
+        "validating": "Validating",
+        "validatingWithAttempt": "Validating ({attempt}/{max})",
+        "valid": "Valid",
+        "validWithWarnings": "Valid with Warnings",
+        "issuesFound": "Issues Found",
+        "error": "Error",
+        "skipped": "Skipped",
+        "capturedScreenshot": "Captured Screenshot:",
+        "issuesFoundLabel": "Issues Found:",
+        "suggestions": "Suggestions:",
+        "passedValidation": "Diagram passed visual validation - no issues detected.",
+        "improvementRequested": "Improvement requested - check the new diagram below",
+        "improveWithSuggestions": "Improve with Suggestions",
+        "regenerateWithFeedback": "Regenerate the diagram using the validation feedback"
     },
     "modelConfig": {
         "title": "AI Model Configuration",
@@ -244,7 +315,9 @@
         "enterSecretKey": "Enter your secret access key",
         "baseUrl": "Base URL",
         "optional": "(optional)",
+        "baseUrlWithExample": "Base URL (optional, e.g. {example})",
         "customEndpoint": "Custom endpoint URL",
+        "minimaxBaseUrlHint": "Use /anthropic for Anthropic-compatible API (recommended), or /v1 for OpenAI-compatible API",
         "models": "Models",
         "customModelId": "Custom model ID...",
         "allAdded": "All added",
@@ -269,10 +342,13 @@
         "noModelsFound": "No models found.",
         "default": "Default",
         "serverDefault": "Server Default",
+        "serverModels": "Server Models",
+        "userModels": "User Models",
         "configureModels": "Configure Models...",
         "onlyVerifiedShown": "Only verified models are shown",
         "showUnvalidatedModels": "Show unvalidated models",
         "allModelsShown": "All models are shown (including unvalidated)",
-        "unvalidatedModelWarning": "This model has not been validated"
+        "unvalidatedModelWarning": "This model has not been validated",
+        "serverDefaultModel": "Server default model"
     }
 }

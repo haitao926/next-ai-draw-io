@@ -19,7 +19,9 @@
 
 一个集成了AI功能的Next.js网页应用，与draw.io图表无缝结合。通过自然语言命令和AI辅助可视化来创建、修改和增强图表。
 
-> 注：感谢 <img src="https://raw.githubusercontent.com/DayuanJiang/next-ai-draw-io/main/public/doubao-color.png" alt="" height="20" /> [字节跳动豆包](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project) 的赞助支持，本项目的 Demo 现已接入强大的 K2-thinking 模型！
+> 注：感谢 <img src="https://raw.githubusercontent.com/DayuanJiang/next-ai-draw-io/main/public/doubao-color.png" alt="" height="20" /> [字节跳动豆包](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio) 的赞助支持，本项目的 Demo 现已接入强大的 glm-4.7 模型！
+
+<a href="https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio" target="_blank"><img src="../../public/volcengine-invite.png" alt="火山引擎方舟 Coding Plan" width="300" /></a>
 
 https://github.com/user-attachments/assets/b2eef5f3-b335-4e71-a755-dc2e80931979
 
@@ -37,11 +39,12 @@ https://github.com/user-attachments/assets/b2eef5f3-b335-4e71-a755-dc2e80931979
     - [安装](#安装)
   - [部署](#部署)
     - [部署到腾讯云EdgeOne Pages](#部署到腾讯云edgeone-pages)
-    - [部署到Vercel（推荐）](#部署到vercel推荐)
+    - [部署到Vercel](#部署到vercel)
     - [部署到Cloudflare Workers](#部署到cloudflare-workers)
   - [多提供商支持](#多提供商支持)
   - [工作原理](#工作原理)
   - [支持与联系](#支持与联系)
+  - [常见问题](#常见问题)
   - [Star历史](#star历史)
 
 ## 示例
@@ -179,7 +182,7 @@ npm run dev
 
 同时，通过腾讯云EdgeOne Pages部署，也会获得[每日免费的DeepSeek模型额度](https://edgeone.cloud.tencent.com/pages/document/169925463311781888)。
 
-### 部署到Vercel（推荐）
+### 部署到Vercel
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FDayuanJiang%2Fnext-ai-draw-io)
 
@@ -194,22 +197,28 @@ npm run dev
 
 ## 多提供商支持
 
--   [字节跳动豆包](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project)
+-   [字节跳动豆包](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio)
 -   AWS Bedrock（默认）
 -   OpenAI
 -   Anthropic
 -   Google AI
+-   Google Vertex AI
 -   Azure OpenAI
 -   Ollama
 -   OpenRouter
 -   DeepSeek
 -   SiliconFlow
+-   ModelScope
 -   SGLang
 -   Vercel AI Gateway
 
 除AWS Bedrock和OpenRouter外，所有提供商都支持自定义端点。
 
 📖 **[详细的提供商配置指南](./ai-providers.md)** - 查看各提供商的设置说明。
+
+### 服务端多模型配置
+
+管理员可以配置多个服务端模型，让所有用户无需提供个人 API Key 即可使用。通过 `AI_MODELS_CONFIG` 环境变量（JSON 字符串）或 `ai-models.json` 文件配置。
 
 **模型要求**：此任务需要强大的模型能力，因为它涉及生成具有严格格式约束的长文本（draw.io XML）。推荐使用 Claude Sonnet 4.5、GPT-5.1、Gemini 3 Pro 和 DeepSeek V3.2/R1。
 
@@ -229,13 +238,17 @@ npm run dev
 
 ## 支持与联系
 
-**特别感谢[字节跳动豆包](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project)赞助演示站点的 API Token 使用！** 注册火山引擎 ARK 平台即可获得50万免费Token！
+**特别感谢[字节跳动豆包](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio)赞助演示站点的 API Token 使用！** 注册火山引擎 ARK 平台即可获得50万免费Token！
 
 如果您觉得这个项目有用，请考虑[赞助](https://github.com/sponsors/DayuanJiang)来帮助我托管在线演示站点！
 
 如需支持或咨询，请在GitHub仓库上提交issue或联系维护者：
 
 -   邮箱：me[at]jiang.jp
+
+## 常见问题
+
+请参阅 [FAQ](./FAQ.md) 了解常见问题和解决方案。
 
 ## Star历史
 

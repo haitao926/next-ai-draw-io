@@ -25,6 +25,25 @@ interface ApplyPresetResult {
     env?: Record<string, string>
 }
 
+/** Proxy configuration interface */
+interface ProxyConfig {
+    httpProxy?: string
+    httpsProxy?: string
+}
+
+/** Result of setting proxy */
+interface SetProxyResult {
+    success: boolean
+    error?: string
+    devMode?: boolean
+}
+
+/** Result of setting user locale */
+interface SetUserLocaleResult {
+    success: boolean
+    error?: string
+}
+
 declare global {
     interface Window {
         /** Main window Electron API */
@@ -45,6 +64,16 @@ declare global {
             openFile: () => Promise<string | null>
             /** Save data to file via save dialog */
             saveFile: (data: string) => Promise<boolean>
+            /** Get proxy configuration */
+            getProxy: () => Promise<ProxyConfig>
+            /** Set proxy configuration (saves and restarts server) */
+            setProxy: (config: ProxyConfig) => Promise<SetProxyResult>
+            /** Get user's preferred locale */
+            getUserLocale: () => Promise<
+                "en" | "zh" | "ja" | "zh-Hant" | undefined
+            >
+            /** Set user's preferred locale */
+            setUserLocale: (locale: string) => Promise<SetUserLocaleResult>
         }
 
         /** Settings window Electron API */
@@ -71,4 +100,10 @@ declare global {
     }
 }
 
-export { ConfigPreset, ApplyPresetResult }
+export type {
+    ConfigPreset,
+    ApplyPresetResult,
+    ProxyConfig,
+    SetProxyResult,
+    SetUserLocaleResult,
+}

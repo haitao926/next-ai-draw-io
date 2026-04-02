@@ -28,12 +28,18 @@
         "azure": "Azure OpenAI",
         "openrouter": "OpenRouter",
         "deepseek": "DeepSeek",
-        "siliconflow": "SiliconFlow"
+        "siliconflow": "SiliconFlow",
+        "modelscope": "ModelScope",
+        "minimax": "MiniMax",
+        "glm": "GLM",
+        "qwen": "Qwen",
+        "kimi": "Kimi",
+        "qiniu": "Qiniu"
     },
     "chat": {
         "placeholder": "ダイアグラムを説明するか、ファイルをアップロード...",
         "send": "送信",
-        "sending": "送信中...",
+        "stopGeneration": "生成を停止",
         "sendMessage": "メッセージを送信",
         "clearConversation": "会話をクリア",
         "diagramHistory": "ダイアグラム履歴",
@@ -51,7 +57,8 @@
         "badResponse": "悪い応答",
         "clickToEdit": "クリックして編集",
         "editMessage": "メッセージを編集",
-        "saveAndSubmit": "保存して送信"
+        "saveAndSubmit": "保存して送信",
+        "ExtractURL": "URLから抽出"
     },
     "examples": {
         "title": "AI でダイアグラムを作成",
@@ -75,6 +82,8 @@
     "settings": {
         "title": "設定",
         "description": "アプリケーション設定を構成します。",
+        "apiKeysModels": "API キーとモデル",
+        "apiKeysModelsDescription": "AI プロバイダーと API キーを設定します。",
         "accessCode": "アクセスコード",
         "accessCodePlaceholder": "アクセスコードを入力",
         "accessCodeDescription": "このアプリケーションを使用するために必要です。",
@@ -98,14 +107,29 @@
         "switchTo": "切り替え",
         "minimal": "ミニマル",
         "sketch": "スケッチ",
-        "closeProtection": "ページ離脱確認",
-        "closeProtectionDescription": "ページを離れる際に確認を表示します。",
         "diagramStyle": "ダイアグラムスタイル",
         "diagramStyleDescription": "ミニマルとスタイル付きの出力を切り替えます。",
+        "sendShortcut": "送信ショートカット",
+        "sendShortcutDescription": "メッセージの送信方法を選択します。",
+        "enterToSend": "Enterで送信",
+        "ctrlEnterToSend": "Cmd/Ctrl+Enterで送信",
         "diagramActions": "ダイアグラム操作",
         "diagramActionsDescription": "ダイアグラムの履歴とエクスポートを管理",
         "history": "履歴",
-        "download": "ダウンロード"
+        "download": "ダウンロード",
+        "proxy": "プロキシ設定",
+        "proxyDescription": "API リクエスト用の HTTP/HTTPS プロキシを設定（デスクトップ版のみ）",
+        "httpProxy": "HTTP プロキシ",
+        "httpsProxy": "HTTPS プロキシ",
+        "applyProxy": "適用",
+        "proxyApplied": "プロキシ設定が適用されました",
+        "diagramValidation": "ダイアグラム検証（実験的）",
+        "diagramValidationDescription": "視覚言語モデルを使用して生成されたダイアグラムを検証します。GPT-5.2 や Sonnet-4.5 などの VLM が必要です。",
+        "enabled": "有効",
+        "disabled": "無効",
+        "customSystemMessage": "カスタムシステムメッセージ",
+        "customSystemMessageDescription": "AIのシステムプロンプトに追加されるカスタム指示を入力します。",
+        "customSystemMessagePlaceholder": "例：ダイアグラムには常に青色のカラースキームを使用..."
     },
     "save": {
         "title": "ダイアグラムを保存",
@@ -117,7 +141,8 @@
             "drawio": "Draw.io XML",
             "png": "PNG 画像",
             "svg": "SVG 画像"
-        }
+        },
+        "savedSuccessfully": "保存完了！"
     },
     "history": {
         "title": "ダイアグラム履歴",
@@ -162,8 +187,11 @@
         "tpmMessage": "リクエストが多すぎます。しばらくお待ちください。",
         "tpmMessageDetailed": "レート制限に達しました（{limit}トークン/分）。{seconds}秒待ってからもう一度リクエストしてください。",
         "messageApi": "今日のデモ利用上限に達してしまったようです。楽しんでいただけて本当に嬉しいです。このデモはByteDance Doubaoのご厚意により提供されていますが、皆様に公平にご利用いただくため、少し制限を設けさせていただいております。",
+        "messageApiSelfHosted": null,
         "messageToken": "今日のトークン利用上限に達してしまったようです。楽しんでいただけて本当に嬉しいです。このデモはByteDance Doubaoのご厚意により提供されていますが、皆様に公平にご利用いただくため、少し制限を設けさせていただいております。",
+        "messageTokenSelfHosted": null,
         "tip": "<strong>ヒント：</strong>独自の API キーを使用する（設定アイコンをクリック）か、プロジェクトをセルフホストしてこれらの制限を回避できます。",
+        "tipSelfHosted": "<strong>ヒント：</strong>設定で独自の API キーを設定することで、引き続きサービスをご利用いただけます。",
         "reset": "制限は明日リセットされます。ご理解ありがとうございます。",
         "doubaoSponsorship": "<a href=\"{link}\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"underline hover:text-foreground\">こちらから登録</a>すると、各モデル（Doubao、DeepSeek、Kimi含む）で50万トークンを無料で取得できます。モデル設定でAPIキーを設定してください。",
         "configModel": "APIキーを使用",
@@ -184,6 +212,15 @@
         "reading": "読み込み中...",
         "chars": "文字",
         "removeFile": "ファイルを削除"
+    },
+    "url": {
+        "title": "URLからコンテンツを抽出",
+        "description": "URLを貼り付けてそのコンテンツを抽出および分析します",
+        "Extracting": "抽出中...",
+        "extract": "抽出",
+        "Cancel": "キャンセル",
+        "enterUrl": "URLを入力してください",
+        "invalidFormat": "無効なURL形式です"
     },
     "reasoning": {
         "thinking": "考え中...",
@@ -211,6 +248,40 @@
         "seekingSponsorship": "スポンサー募集",
         "contactMe": "お問い合わせ",
         "usageNotice": "利用量の増加に伴い、コスト削減のためモデルを Claude から minimax-m2 に変更し、いくつかの利用制限を設けました。詳細は概要ページをご覧ください。"
+    },
+    "sessionHistory": {
+        "tooltip": "チャット履歴",
+        "newChat": "新しいチャット",
+        "empty": "チャット履歴はまだありません",
+        "emptyHint": "会話を始めてください",
+        "today": "今日",
+        "yesterday": "昨日",
+        "thisWeek": "今週",
+        "earlier": "それ以前",
+        "deleteTitle": "このチャットを削除しますか？",
+        "deleteDescription": "このチャットセッションとダイアグラムは完全に削除されます。この操作は取り消せません。",
+        "recentChats": "最近のチャット",
+        "justNow": "たった今",
+        "searchPlaceholder": "チャットを検索...",
+        "noResults": "チャットが見つかりません"
+    },
+    "validation": {
+        "title": "ダイアグラムを検証",
+        "capturing": "キャプチャ中",
+        "validating": "検証中",
+        "validatingWithAttempt": "検証中 ({attempt}/{max})",
+        "valid": "有効",
+        "validWithWarnings": "有効（警告あり）",
+        "issuesFound": "問題が見つかりました",
+        "error": "エラー",
+        "skipped": "スキップ",
+        "capturedScreenshot": "キャプチャした画像：",
+        "issuesFoundLabel": "検出された問題：",
+        "suggestions": "提案：",
+        "passedValidation": "ダイアグラムは視覚検証に合格しました - 問題は検出されませんでした。",
+        "improvementRequested": "改善リクエスト済み - 下の新しいダイアグラムを確認してください",
+        "improveWithSuggestions": "提案で改善",
+        "regenerateWithFeedback": "検証フィードバックを使用してダイアグラムを再生成"
     },
     "modelConfig": {
         "title": "AIモデル設定",
@@ -244,7 +315,9 @@
         "enterSecretKey": "シークレットアクセスキーを入力",
         "baseUrl": "ベース URL",
         "optional": "（オプション）",
+        "baseUrlWithExample": "ベース URL（オプション、例: {example}）",
         "customEndpoint": "カスタムエンドポイント URL",
+        "minimaxBaseUrlHint": "/anthropic で Anthropic 互換 API（推奨）、または /v1 で OpenAI 互換 API を使用",
         "models": "モデル",
         "customModelId": "カスタムモデル ID...",
         "allAdded": "すべて追加済み",
@@ -269,10 +342,13 @@
         "noModelsFound": "モデルが見つかりません。",
         "default": "デフォルト",
         "serverDefault": "サーバーデフォルト",
+        "serverModels": "サーバーモデル",
+        "userModels": "ユーザーモデル",
         "configureModels": "モデルを設定...",
         "onlyVerifiedShown": "検証済みのモデルのみ表示",
         "showUnvalidatedModels": "未検証のモデルを表示",
         "allModelsShown": "すべてのモデルを表示（未検証を含む）",
-        "unvalidatedModelWarning": "このモデルは検証されていません"
+        "unvalidatedModelWarning": "このモデルは検証されていません",
+        "serverDefaultModel": "サーバーデフォルトモデル"
     }
 }

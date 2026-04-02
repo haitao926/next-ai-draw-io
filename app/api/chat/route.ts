@@ -14,10 +14,16 @@ import path from "path"
 import { z } from "zod"
 import {
     getAIModel,
+    SINGLE_SYSTEM_PROVIDERS,
     supportsImageInput,
     supportsPromptCaching,
 } from "@/lib/ai-providers"
 import { findCachedResponse } from "@/lib/cached-responses"
+import {
+    isMinimalDiagram,
+    replaceHistoricalToolInputs,
+    validateFileParts,
+} from "@/lib/chat-helpers"
 import {
     checkAndIncrementRequest,
     isQuotaEnabled,
@@ -29,97 +35,11 @@ import {
     setTraceOutput,
     wrapWithObserve,
 } from "@/lib/langfuse"
+import { findServerModelById } from "@/lib/server-model-config"
 import { getSystemPrompt } from "@/lib/system-prompts"
 import { getUserIdFromRequest } from "@/lib/user-id"
 
 export const maxDuration = 120
-
-// File upload limits (must match client-side)
-const MAX_FILE_SIZE = 2 * 1024 * 1024 // 2MB
-const MAX_FILES = 5
-
-// Helper function to validate file parts in messages
-function validateFileParts(messages: any[]): {
-    valid: boolean
-    error?: string
-} {
-    const lastMessage = messages[messages.length - 1]
-    const fileParts =
-        lastMessage?.parts?.filter((p: any) => p.type === "file") || []
-
-    if (fileParts.length > MAX_FILES) {
-        return {
-            valid: false,
-            error: `Too many files. Maximum ${MAX_FILES} allowed.`,
-        }
-    }
-
-    for (const filePart of fileParts) {
-        // Data URLs format: data:image/png;base64,<data>
-        // Base64 increases size by ~33%, so we check the decoded size
-        if (filePart.url?.startsWith("data:")) {
-            const base64Data = filePart.url.split(",")[1]
-            if (base64Data) {
-                const sizeInBytes = Math.ceil((base64Data.length * 3) / 4)
-                if (sizeInBytes > MAX_FILE_SIZE) {
-                    return {
-                        valid: false,
-                        error: `File exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit.`,
-                    }
-                }
-            }
-        }
-    }
-
-    return { valid: true }
-}
-
-// Helper function to check if diagram is minimal/empty
-function isMinimalDiagram(xml: string): boolean {
-    const stripped = xml.replace(/\s/g, "")
-    return !stripped.includes('id="2"')
-}
-
-// Helper function to replace historical tool call XML with placeholders
-// This reduces token usage and forces LLM to rely on the current diagram XML (source of truth)
-// Also fixes invalid/undefined inputs from interrupted streaming
-function replaceHistoricalToolInputs(messages: any[]): any[] {
-    return messages.map((msg) => {
-        if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
-            return msg
-        }
-        const replacedContent = msg.content
-            .map((part: any) => {
-                if (part.type === "tool-call") {
-                    const toolName = part.toolName
-                    // Fix invalid/undefined inputs from interrupted streaming
-                    if (
-                        !part.input ||
-                        typeof part.input !== "object" ||
-                        Object.keys(part.input).length === 0
-                    ) {
-                        // Skip tool calls with invalid inputs entirely
-                        return null
-                    }
-                    if (
-                        toolName === "display_diagram" ||
-                        toolName === "edit_diagram"
-                    ) {
-                        return {
-                            ...part,
-                            input: {
-                                placeholder:
-                                    "[XML content replaced - see current diagram XML in system context]",
-                            },
-                        }
-                    }
-                }
-                return part
-            })
-            .filter(Boolean) // Remove null entries (invalid tool calls)
-        return { ...msg, content: replacedContent }
-    })
-}
 
 // Helper function to create cached stream response
 function createCachedStreamResponse(xml: string): Response {
@@ -170,7 +90,12 @@ async function handleChatRequest(req: Request): Promise<Response> {
         }
     }
 
-    const { messages, xml, previousXml, sessionId } = await req.json()
+    const body = await req.json()
+    const { messages, xml, previousXml, sessionId } = body
+    const customSystemMessage =
+        typeof body.customSystemMessage === "string"
+            ? body.customSystemMessage.slice(0, 5000)
+            : ""
 
     // Get user ID for Langfuse tracking and quota
     const userId = getUserIdFromRequest(req)
@@ -199,7 +124,10 @@ async function handleChatRequest(req: Request): Promise<Response> {
     // === SERVER-SIDE QUOTA CHECK START ===
     // Quota is opt-in: only enabled when DYNAMODB_QUOTA_TABLE env var is set
     const hasOwnApiKey = !!(
-        req.headers.get("x-ai-provider") && req.headers.get("x-ai-api-key")
+        req.headers.get("x-ai-provider") &&
+        (req.headers.get("x-ai-api-key") ||
+            req.headers.get("x-aws-access-key-id") ||
+            req.headers.get("x-vertex-api-key"))
     )
 
     // Skip quota check if: quota disabled, user has own API key, or is anonymous
@@ -250,6 +178,7 @@ async function handleChatRequest(req: Request): Promise<Response> {
     // Read client AI provider overrides from headers
     const provider = req.headers.get("x-ai-provider")
     let baseUrl = req.headers.get("x-ai-base-url")
+    const selectedModelId = req.headers.get("x-selected-model-id")
 
     // For EdgeOne provider, construct full URL from request origin
     // because createOpenAI needs absolute URL, not relative path
@@ -261,8 +190,30 @@ async function handleChatRequest(req: Request): Promise<Response> {
     // Get cookie header for EdgeOne authentication (eo_token, eo_time)
     const cookieHeader = req.headers.get("cookie")
 
+    // Check if this is a server model with custom env var names
+    let serverModelConfig: {
+        apiKeyEnv?: string | string[]
+        baseUrlEnv?: string
+        provider?: string
+    } = {}
+    if (selectedModelId?.startsWith("server:")) {
+        const serverModel = await findServerModelById(selectedModelId)
+        console.log(
+            `[Server Model Lookup] ID: ${selectedModelId}, Found: ${!!serverModel}, Provider: ${serverModel?.provider}`,
+        )
+        if (serverModel) {
+            serverModelConfig = {
+                apiKeyEnv: serverModel.apiKeyEnv,
+                baseUrlEnv: serverModel.baseUrlEnv,
+                // Use actual provider from config (client header may have incorrect value due to ID format change)
+                provider: serverModel.provider,
+            }
+        }
+    }
+
     const clientOverrides = {
-        provider,
+        // Server model provider takes precedence over client header
+        provider: serverModelConfig.provider || provider,
         baseUrl,
         apiKey: req.headers.get("x-ai-api-key"),
         modelId: req.headers.get("x-ai-model"),
@@ -271,6 +222,10 @@ async function handleChatRequest(req: Request): Promise<Response> {
         awsSecretAccessKey: req.headers.get("x-aws-secret-access-key"),
         awsRegion: req.headers.get("x-aws-region"),
         awsSessionToken: req.headers.get("x-aws-session-token"),
+        // Server model custom env var names
+        ...serverModelConfig,
+        // Vertex AI credentials (Express Mode)
+        vertexApiKey: req.headers.get("x-vertex-api-key"),
         // Pass cookies for EdgeOne Pages authentication
         ...(provider === "edgeone" &&
             cookieHeader && {
@@ -281,9 +236,18 @@ async function handleChatRequest(req: Request): Promise<Response> {
     // Read minimal style preference from header
     const minimalStyle = req.headers.get("x-minimal-style") === "true"
 
+    console.log(
+        `[Client Overrides] provider: ${clientOverrides.provider}, modelId: ${clientOverrides.modelId}`,
+    )
+
     // Get AI model with optional client overrides
-    const { model, providerOptions, headers, modelId } =
-        getAIModel(clientOverrides)
+    const {
+        model,
+        providerOptions,
+        headers,
+        modelId,
+        provider: resolvedProvider,
+    } = getAIModel(clientOverrides)
 
     // Check if model supports prompt caching
     const shouldCache = supportsPromptCaching(modelId)
@@ -293,6 +257,9 @@ async function handleChatRequest(req: Request): Promise<Response> {
 
     // Get the appropriate system prompt based on model (extended for Opus/Haiku 4.5)
     const systemMessage = getSystemPrompt(modelId, minimalStyle)
+    const finalSystemMessage = customSystemMessage
+        ? `${systemMessage}\n\n## Custom Instructions\n${customSystemMessage}`
+        : systemMessage
 
     // Extract file parts (images) from the last user message
     const fileParts =
@@ -465,37 +432,63 @@ ${userInputText}
     }
 
     // System messages with multiple cache breakpoints for optimal caching:
-    // - Breakpoint 1: Static instructions (~1500 tokens) - rarely changes
+    // - Breakpoint 1: System instructions + custom instructions - changes when user updates custom system message
     // - Breakpoint 2: Current XML context - changes per diagram, but constant within a conversation turn
-    // This allows: if only user message changes, both system caches are reused
-    //              if XML changes, instruction cache is still reused
-    const systemMessages = [
-        // Cache breakpoint 1: Instructions (rarely change)
-        {
-            role: "system" as const,
-            content: systemMessage,
-            ...(shouldCache && {
-                providerOptions: {
-                    bedrock: { cachePoint: { type: "default" } },
-                },
-            }),
-        },
-        // Cache breakpoint 2: Previous and Current diagram XML context
-        {
-            role: "system" as const,
-            content: `${previousXml ? `Previous diagram XML (before user's last message):\n"""xml\n${previousXml}\n"""\n\n` : ""}Current diagram XML (AUTHORITATIVE - the source of truth):\n"""xml\n${xml || ""}\n"""\n\nIMPORTANT: The "Current diagram XML" is the SINGLE SOURCE OF TRUTH for what's on the canvas right now. The user can manually add, delete, or modify shapes directly in draw.io. Always count and describe elements based on the CURRENT XML, not on what you previously generated. If both previous and current XML are shown, compare them to understand what the user changed. When using edit_diagram, COPY search patterns exactly from the CURRENT XML - attribute order matters!`,
-            ...(shouldCache && {
-                providerOptions: {
-                    bedrock: { cachePoint: { type: "default" } },
-                },
-            }),
-        },
-    ]
+    // Some providers (e.g. MiniMax) don't support multiple system messages
+    // Merge them into a single system message for compatibility
+    const isSingleSystemProvider = SINGLE_SYSTEM_PROVIDERS.has(resolvedProvider)
+
+    const xmlContext = `${
+        previousXml
+            ? `Previous diagram XML (before user's last message):
+"""xml
+${previousXml}
+"""
+
+`
+            : ""
+    }Current diagram XML (AUTHORITATIVE - the source of truth):
+"""xml
+${xml || ""}
+"""
+
+IMPORTANT: The "Current diagram XML" is the SINGLE SOURCE OF TRUTH for what's on the canvas right now. The user can manually add, delete, or modify shapes directly in draw.io. Always count and describe elements based on the CURRENT XML, not on what you previously generated. If both previous and current XML are shown, compare them to understand what the user changed. When using edit_diagram, COPY search patterns exactly from the CURRENT XML - attribute order matters!`
+
+    const systemMessages = isSingleSystemProvider
+        ? [
+              {
+                  role: "system" as const,
+                  content: `${finalSystemMessage}\n\n${xmlContext}`,
+              },
+          ]
+        : [
+              // Cache breakpoint 1: Instructions (+ optional custom instructions)
+              {
+                  role: "system" as const,
+                  content: finalSystemMessage,
+                  ...(shouldCache && {
+                      providerOptions: {
+                          bedrock: { cachePoint: { type: "default" } },
+                      },
+                  }),
+              },
+              // Cache breakpoint 2: Previous and Current diagram XML context
+              {
+                  role: "system" as const,
+                  content: xmlContext,
+                  ...(shouldCache && {
+                      providerOptions: {
+                          bedrock: { cachePoint: { type: "default" } },
+                      },
+                  }),
+              },
+          ]
 
     const allMessages = [...systemMessages, ...enhancedMessages]
 
     const result = streamText({
         model,
+        abortSignal: req.signal,
         ...(process.env.MAX_OUTPUT_TOKENS && {
             maxOutputTokens: parseInt(process.env.MAX_OUTPUT_TOKENS, 10),
         }),
@@ -523,6 +516,13 @@ ${userInputText}
                         inputToRepair = inputToRepair.replace(/:=/g, ": ")
                         // Fix `= "` instead of `: "`
                         inputToRepair = inputToRepair.replace(/=\s*"/g, ': "')
+                        // Fix inconsistent quote escaping in XML attributes within JSON strings
+                        // Pattern: attribute="value\" where opening quote is unescaped but closing is escaped
+                        // Example: y="-20\" should be y=\"-20\"
+                        inputToRepair = inputToRepair.replace(
+                            /(\w+)="([^"]*?)\\"/g,
+                            '$1=\\"$2\\"',
+                        )
                     }
                     // Use jsonrepair to fix truncated JSON
                     const repairedInput = jsonrepair(inputToRepair)
@@ -702,7 +702,7 @@ Available libraries:
 - Networking: cisco19, network, kubernetes, vvd, rack
 - Business: bpmn, lean_mapping
 - General: flowchart, basic, arrows2, infographic, sitemap
-- UI/Mockups: android
+- UI/Mockups: android, material_design
 - Enterprise: citrix, sap, mscae, atlassian
 - Engineering: fluidpower, electrical, pid, cabinets, floorplan
 - Icons: webicons
@@ -747,7 +747,7 @@ Call this tool to get shape names and usage syntax for a specific library.`,
                         if (
                             (error as NodeJS.ErrnoException).code === "ENOENT"
                         ) {
-                            return `Library "${library}" not found. Available: aws4, azure2, gcp2, alibaba_cloud, cisco19, kubernetes, network, bpmn, flowchart, basic, arrows2, vvd, salesforce, citrix, sap, mscae, atlassian, fluidpower, electrical, pid, cabinets, floorplan, webicons, infographic, sitemap, android, lean_mapping, openstack, rack`
+                            return `Library "${library}" not found. Available: aws4, azure2, gcp2, alibaba_cloud, cisco19, kubernetes, network, bpmn, flowchart, basic, arrows2, vvd, salesforce, citrix, sap, mscae, atlassian, fluidpower, electrical, pid, cabinets, floorplan, webicons, infographic, sitemap, android, material_design, lean_mapping, openstack, rack`
                         }
                         console.error(
                             `[get_shape_library] Error loading "${library}":`,

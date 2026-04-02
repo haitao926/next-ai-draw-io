@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
-import Image from "next/image"
 import Link from "next/link"
 import { FaGithub } from "react-icons/fa"
+import Image from "@/components/image-with-basepath"
 
 export const metadata: Metadata = {
     title: "关于 - Next AI Draw.io",
@@ -10,18 +10,7 @@ export const metadata: Metadata = {
     keywords: ["AI图表", "draw.io", "AWS架构", "GCP图表", "Azure图表", "LLM"],
 }
 
-function formatNumber(num: number): string {
-    if (num >= 1000) {
-        return `${num / 1000}k`
-    }
-    return num.toString()
-}
-
 export default function AboutCN() {
-    const dailyRequestLimit = Number(process.env.DAILY_REQUEST_LIMIT) || 20
-    const dailyTokenLimit = Number(process.env.DAILY_TOKEN_LIMIT) || 500000
-    const tpmLimit = Number(process.env.TPM_LIMIT) || 50000
-
     return (
         <div className="min-h-screen bg-gray-50">
             {/* Navigation */}
@@ -89,7 +78,7 @@ export default function AboutCN() {
                                 <p>
                                     好消息！感谢{" "}
                                     <a
-                                        href="https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project"
+                                        href="https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio"
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="font-semibold text-blue-600 hover:underline"
@@ -98,7 +87,7 @@ export default function AboutCN() {
                                     </a>
                                     的慷慨赞助，演示站点现已接入强大的{" "}
                                     <span className="font-semibold text-amber-700">
-                                        K2-thinking
+                                        glm-4.7
                                     </span>{" "}
                                     模型，图表生成效果更佳！点击链接注册即可领取{" "}
                                     <span className="font-semibold text-amber-700">
@@ -108,40 +97,21 @@ export default function AboutCN() {
                                 </p>
                             </div>
 
-                            {/* Usage Limits */}
-                            <p className="text-sm text-gray-600 mb-3">
-                                当前使用限制：
-                            </p>
-                            <div className="grid grid-cols-3 gap-3 mb-5">
-                                <div className="text-center p-3 bg-white/60 rounded-lg">
-                                    <p className="text-lg font-bold text-amber-600">
-                                        {formatNumber(dailyRequestLimit)}
-                                    </p>
-                                    <p className="text-xs text-gray-500">
-                                        请求/天
-                                    </p>
-                                </div>
-                                <div className="text-center p-3 bg-white/60 rounded-lg">
-                                    <p className="text-lg font-bold text-amber-600">
-                                        {formatNumber(dailyTokenLimit)}
-                                    </p>
-                                    <p className="text-xs text-gray-500">
-                                        Token/天
-                                    </p>
-                                </div>
-                                <div className="text-center p-3 bg-white/60 rounded-lg">
-                                    <p className="text-lg font-bold text-amber-600">
-                                        {formatNumber(tpmLimit)}
-                                    </p>
-                                    <p className="text-xs text-gray-500">
-                                        Token/分钟
-                                    </p>
-                                </div>
-                            </div>
-
-                            {/* Divider */}
-                            <div className="flex items-center gap-3 my-5">
-                                <div className="flex-1 h-px bg-gradient-to-r from-transparent via-amber-300 to-transparent" />
+                            {/* Invite Poster */}
+                            <div className="text-center mb-5">
+                                <a
+                                    href="https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >
+                                    <Image
+                                        src="/volcengine-invite.png"
+                                        alt="火山引擎方舟 Coding Plan"
+                                        width={300}
+                                        height={400}
+                                        className="mx-auto rounded-lg"
+                                    />
+                                </a>
                             </div>
 
                             {/* Bring Your Own Key */}
@@ -324,7 +294,7 @@ export default function AboutCN() {
                     <ul className="list-disc pl-6 text-gray-700 space-y-1">
                         <li>
                             <a
-                                href="https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project"
+                                href="https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="text-blue-600 hover:underline"
@@ -339,11 +309,13 @@ export default function AboutCN() {
                         </li>
                         <li>Anthropic</li>
                         <li>Google AI</li>
+                        <li>Google Vertex AI</li>
                         <li>Azure OpenAI</li>
                         <li>Ollama</li>
                         <li>OpenRouter</li>
                         <li>DeepSeek</li>
                         <li>SiliconFlow</li>
+                        <li>ModelScope</li>
                     </ul>
                     <p className="text-gray-700 mt-4">
                         注意：<code>claude-sonnet-4-5</code>{" "}
@@ -357,7 +329,7 @@ export default function AboutCN() {
                     <p className="text-gray-700 mb-4 font-semibold">
                         特别感谢{" "}
                         <a
-                            href="https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project"
+                            href="https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-blue-600 hover:underline"

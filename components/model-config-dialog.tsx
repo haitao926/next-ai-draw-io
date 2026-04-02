@@ -54,7 +54,11 @@ import { useDictionary } from "@/hooks/use-dictionary"
 import type { UseModelConfigReturn } from "@/hooks/use-model-config"
 import { formatMessage } from "@/lib/i18n/utils"
 import type { ProviderConfig, ProviderName } from "@/lib/types/model-config"
-import { PROVIDER_INFO, SUGGESTED_MODELS } from "@/lib/types/model-config"
+import {
+    PROVIDER_INFO,
+    PROVIDER_LOGO_MAP,
+    SUGGESTED_MODELS,
+} from "@/lib/types/model-config"
 import { cn } from "@/lib/utils"
 
 interface ModelConfigDialogProps {
@@ -64,22 +68,6 @@ interface ModelConfigDialogProps {
 }
 
 type ValidationStatus = "idle" | "validating" | "success" | "error"
-
-// Map provider names to models.dev logo names
-const PROVIDER_LOGO_MAP: Record<string, string> = {
-    openai: "openai",
-    anthropic: "anthropic",
-    google: "google",
-    azure: "azure",
-    bedrock: "amazon-bedrock",
-    openrouter: "openrouter",
-    deepseek: "deepseek",
-    siliconflow: "siliconflow",
-    sglang: "openai", // SGLang is OpenAI-compatible
-    gateway: "vercel",
-    edgeone: "tencent-cloud",
-    doubao: "bytedance",
-}
 
 // Provider logo component
 function ProviderLogo({
@@ -102,6 +90,7 @@ function ProviderLogo({
 
     const logoName = PROVIDER_LOGO_MAP[provider] || provider
     return (
+        // biome-ignore lint/performance/noImgElement: External URL from models.dev
         <img
             alt={`${provider} logo`}
             className={cn("size-4 dark:invert", className)}
@@ -235,6 +224,7 @@ export function ModelConfigDialog({
             "awsAccessKeyId",
             "awsSecretAccessKey",
             "awsRegion",
+            "vertexApiKey",
         ]
         if (credentialFields.includes(field)) {
             setValidationStatus("idle")
@@ -273,11 +263,13 @@ export function ModelConfigDialog({
 
     // Validate all models
     const handleValidate = useCallback(async () => {
-        if (!selectedProvider) return
+        if (!selectedProvider || !selectedProviderId) return
 
         // Check credentials based on provider type
         const isBedrock = selectedProvider.provider === "bedrock"
         const isEdgeOne = selectedProvider.provider === "edgeone"
+        const isOllama = selectedProvider.provider === "ollama"
+        const isVertexAI = selectedProvider.provider === "vertexai"
         if (isBedrock) {
             if (
                 !selectedProvider.awsAccessKeyId ||
@@ -286,7 +278,12 @@ export function ModelConfigDialog({
             ) {
                 return
             }
-        } else if (!isEdgeOne && !selectedProvider.apiKey) {
+        } else if (isVertexAI) {
+            // Vertex AI requires vertexApiKey for Express Mode
+            if (!selectedProvider.vertexApiKey) {
+                return
+            }
+        } else if (!isEdgeOne && !isOllama && !selectedProvider.apiKey) {
             return
         }
 
@@ -326,19 +323,21 @@ export function ModelConfigDialog({
                         awsAccessKeyId: selectedProvider.awsAccessKeyId,
                         awsSecretAccessKey: selectedProvider.awsSecretAccessKey,
                         awsRegion: selectedProvider.awsRegion,
+                        // Vertex AI credentials (Express Mode)
+                        vertexApiKey: selectedProvider.vertexApiKey,
                     }),
                 })
                 const data = await response.json()
 
                 if (data.valid) {
-                    updateModel(selectedProviderId!, model.id, {
+                    updateModel(selectedProviderId, model.id, {
                         validated: true,
                         validationError: undefined,
                     })
                 } else {
                     allValid = false
                     errorCount++
-                    updateModel(selectedProviderId!, model.id, {
+                    updateModel(selectedProviderId, model.id, {
                         validated: false,
                         validationError: data.error || "Validation failed",
                     })
@@ -346,7 +345,7 @@ export function ModelConfigDialog({
             } catch {
                 allValid = false
                 errorCount++
-                updateModel(selectedProviderId!, model.id, {
+                updateModel(selectedProviderId, model.id, {
                     validated: false,
                     validationError: "Network error",
                 })
@@ -357,7 +356,7 @@ export function ModelConfigDialog({
 
         if (allValid) {
             setValidationStatus("success")
-            updateProvider(selectedProviderId!, { validated: true })
+            updateProvider(selectedProviderId, { validated: true })
             // Reset to idle after showing success briefly (with cleanup)
             if (validationResetTimeoutRef.current) {
                 clearTimeout(validationResetTimeoutRef.current)
@@ -431,12 +430,12 @@ export function ModelConfigDialog({
                                             }}
                                             className={cn(
                                                 "group flex items-center gap-3 px-3 py-2.5 rounded-xl w-full",
-                                                "text-left text-sm transition-all duration-150",
+                                                "text-left text-sm transition-all duration-150 border border-transparent",
                                                 "hover:bg-interactive-hover",
                                                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                                                 selectedProviderId ===
                                                     provider.id &&
-                                                    "bg-surface-0 shadow-sm ring-1 ring-border-subtle",
+                                                    "bg-surface-0 shadow-sm border-border-subtle",
                                             )}
                                         >
                                             <div
@@ -514,7 +513,7 @@ export function ModelConfigDialog({
                     </div>
 
                     {/* Provider Details (Right Panel) */}
-                    <div className="flex-1 min-w-0 flex flex-col overflow-auto [&::-webkit-scrollbar]:hidden ">
+                    <div className="flex-1 min-w-0 flex flex-col overflow-auto scrollbar-thin">
                         {selectedProvider ? (
                             <ScrollArea className="flex-1" ref={scrollRef}>
                                 <div className="p-6 space-y-8">
@@ -865,6 +864,159 @@ export function ModelConfigDialog({
                                                     </div>
                                                 </>
                                             ) : selectedProvider.provider ===
+                                              "vertexai" ? (
+                                                <>
+                                                    {/* Vertex AI API Key */}
+                                                    <div className="space-y-2">
+                                                        <Label
+                                                            htmlFor="vertex-api-key"
+                                                            className="text-xs font-medium flex items-center gap-1.5"
+                                                        >
+                                                            <Key className="h-3.5 w-3.5 text-muted-foreground" />
+                                                            API Key
+                                                        </Label>
+                                                        <div className="flex gap-2">
+                                                            <div className="relative flex-1">
+                                                                <Input
+                                                                    id="vertex-api-key"
+                                                                    type={
+                                                                        showApiKey
+                                                                            ? "text"
+                                                                            : "password"
+                                                                    }
+                                                                    value={
+                                                                        selectedProvider.vertexApiKey ||
+                                                                        ""
+                                                                    }
+                                                                    onChange={(
+                                                                        e,
+                                                                    ) =>
+                                                                        handleProviderUpdate(
+                                                                            "vertexApiKey",
+                                                                            e
+                                                                                .target
+                                                                                .value,
+                                                                        )
+                                                                    }
+                                                                    placeholder="Enter your Vertex AI API key"
+                                                                    className="h-9 pr-10 font-mono text-xs"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                        setShowApiKey(
+                                                                            !showApiKey,
+                                                                        )
+                                                                    }
+                                                                    aria-label={
+                                                                        showApiKey
+                                                                            ? "Hide API key"
+                                                                            : "Show API key"
+                                                                    }
+                                                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
+                                                                >
+                                                                    {showApiKey ? (
+                                                                        <EyeOff className="h-4 w-4" />
+                                                                    ) : (
+                                                                        <Eye className="h-4 w-4" />
+                                                                    )}
+                                                                </button>
+                                                            </div>
+                                                            <Button
+                                                                variant={
+                                                                    validationStatus ===
+                                                                    "success"
+                                                                        ? "outline"
+                                                                        : "default"
+                                                                }
+                                                                size="sm"
+                                                                onClick={
+                                                                    handleValidate
+                                                                }
+                                                                disabled={
+                                                                    !selectedProvider.vertexApiKey ||
+                                                                    validationStatus ===
+                                                                        "validating"
+                                                                }
+                                                                className={cn(
+                                                                    "h-9 px-4",
+                                                                    validationStatus ===
+                                                                        "success" &&
+                                                                        "text-success border-success/30 bg-success-muted hover:bg-success-muted",
+                                                                )}
+                                                            >
+                                                                {validationStatus ===
+                                                                "validating" ? (
+                                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                                ) : validationStatus ===
+                                                                  "success" ? (
+                                                                    <>
+                                                                        <Check className="h-4 w-4 mr-1.5 animate-check-pop" />
+                                                                        {
+                                                                            dict
+                                                                                .modelConfig
+                                                                                .verified
+                                                                        }
+                                                                    </>
+                                                                ) : (
+                                                                    dict
+                                                                        .modelConfig
+                                                                        .test
+                                                                )}
+                                                            </Button>
+                                                        </div>
+                                                        {validationStatus ===
+                                                            "error" &&
+                                                            validationError && (
+                                                                <p className="text-xs text-destructive flex items-center gap-1">
+                                                                    <X className="h-3 w-3" />
+                                                                    {
+                                                                        validationError
+                                                                    }
+                                                                </p>
+                                                            )}
+                                                    </div>
+
+                                                    {/* Base URL (optional) */}
+                                                    <div className="space-y-2">
+                                                        <Label
+                                                            htmlFor="vertex-base-url"
+                                                            className="text-xs font-medium flex items-center gap-1.5"
+                                                        >
+                                                            <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
+                                                            {formatMessage(
+                                                                dict.modelConfig
+                                                                    .baseUrlWithExample,
+                                                                {
+                                                                    example:
+                                                                        PROVIDER_INFO[
+                                                                            selectedProvider
+                                                                                .provider
+                                                                        ]
+                                                                            .defaultBaseUrl ||
+                                                                        "https://api.example.com/v1",
+                                                                },
+                                                            )}
+                                                        </Label>
+                                                        <Input
+                                                            id="vertex-base-url"
+                                                            value={
+                                                                selectedProvider.baseUrl ||
+                                                                ""
+                                                            }
+                                                            onChange={(e) =>
+                                                                handleProviderUpdate(
+                                                                    "baseUrl",
+                                                                    e.target
+                                                                        .value,
+                                                                )
+                                                            }
+                                                            placeholder="Custom endpoint URL"
+                                                            className="h-9 font-mono text-xs"
+                                                        />
+                                                    </div>
+                                                </>
+                                            ) : selectedProvider.provider ===
                                               "edgeone" ? (
                                                 <div className="space-y-3">
                                                     <div className="flex items-center gap-2">
@@ -933,6 +1085,9 @@ export function ModelConfigDialog({
                                                                 dict.modelConfig
                                                                     .apiKey
                                                             }
+                                                            {selectedProvider.provider ===
+                                                                "ollama" &&
+                                                                ` ${dict.modelConfig.optional}`}
                                                         </Label>
                                                         <div className="flex gap-2">
                                                             <div className="relative flex-1">
@@ -996,7 +1151,9 @@ export function ModelConfigDialog({
                                                                     handleValidate
                                                                 }
                                                                 disabled={
-                                                                    !selectedProvider.apiKey ||
+                                                                    (selectedProvider.provider !==
+                                                                        "ollama" &&
+                                                                        !selectedProvider.apiKey) ||
                                                                     validationStatus ===
                                                                         "validating"
                                                                 }
@@ -1046,17 +1203,19 @@ export function ModelConfigDialog({
                                                             className="text-xs font-medium flex items-center gap-1.5"
                                                         >
                                                             <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
-                                                            {
+                                                            {formatMessage(
                                                                 dict.modelConfig
-                                                                    .baseUrl
-                                                            }
-                                                            <span className="text-muted-foreground font-normal">
+                                                                    .baseUrlWithExample,
                                                                 {
-                                                                    dict
-                                                                        .modelConfig
-                                                                        .optional
-                                                                }
-                                                            </span>
+                                                                    example:
+                                                                        PROVIDER_INFO[
+                                                                            selectedProvider
+                                                                                .provider
+                                                                        ]
+                                                                            .defaultBaseUrl ||
+                                                                        "https://api.example.com/v1",
+                                                                },
+                                                            )}
                                                         </Label>
                                                         <Input
                                                             id="base-url"
@@ -1082,6 +1241,16 @@ export function ModelConfigDialog({
                                                             }
                                                             className="h-9 rounded-xl font-mono text-xs"
                                                         />
+                                                        {selectedProvider.provider ===
+                                                            "minimax" && (
+                                                            <p className="text-xs text-muted-foreground">
+                                                                {
+                                                                    dict
+                                                                        .modelConfig
+                                                                        .minimaxBaseUrlHint
+                                                                }
+                                                            </p>
+                                                        )}
                                                     </div>
                                                 </>
                                             )}
@@ -1298,20 +1467,24 @@ export function ModelConfigDialog({
                                                                                     null,
                                                                                 )
                                                                             }
-                                                                            updateModel(
-                                                                                selectedProviderId!,
-                                                                                model.id,
-                                                                                {
-                                                                                    modelId:
-                                                                                        e
-                                                                                            .target
-                                                                                            .value,
-                                                                                    validated:
-                                                                                        undefined,
-                                                                                    validationError:
-                                                                                        undefined,
-                                                                                },
-                                                                            )
+                                                                            if (
+                                                                                selectedProviderId
+                                                                            ) {
+                                                                                updateModel(
+                                                                                    selectedProviderId,
+                                                                                    model.id,
+                                                                                    {
+                                                                                        modelId:
+                                                                                            e
+                                                                                                .target
+                                                                                                .value,
+                                                                                        validated:
+                                                                                            undefined,
+                                                                                        validationError:
+                                                                                            undefined,
+                                                                                    },
+                                                                                )
+                                                                            }
                                                                         }}
                                                                         onKeyDown={(
                                                                             e,
@@ -1488,12 +1661,16 @@ export function ModelConfigDialog({
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                             <Switch
+                                id="show-unvalidated-models"
                                 checked={modelConfig.showUnvalidatedModels}
                                 onCheckedChange={
                                     modelConfig.setShowUnvalidatedModels
                                 }
                             />
-                            <Label className="text-xs text-muted-foreground cursor-pointer">
+                            <Label
+                                htmlFor="show-unvalidated-models"
+                                className="text-xs text-muted-foreground cursor-pointer"
+                            >
                                 {dict.modelConfig.showUnvalidatedModels}
                             </Label>
                         </div>

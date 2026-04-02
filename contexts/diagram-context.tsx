@@ -3,28 +3,36 @@
 import type React from "react"
 import { createContext, useContext, useEffect, useRef, useState } from "react"
 import type { DrawIoEmbedRef } from "react-drawio"
-import { STORAGE_DIAGRAM_XML_KEY } from "@/components/chat-panel"
+import { toast } from "sonner"
 import type { ExportFormat } from "@/components/save-dialog"
 import { getApiEndpoint } from "@/lib/base-path"
-import { extractDiagramXML, validateAndFixXml } from "../lib/utils"
+import {
+    extractDiagramXML,
+    isRealDiagram,
+    validateAndFixXml,
+} from "../lib/utils"
 
 interface DiagramContextType {
     chartXML: string
     latestSvg: string
     diagramHistory: { svg: string; xml: string }[]
+    setDiagramHistory: (history: { svg: string; xml: string }[]) => void
     loadDiagram: (chart: string, skipValidation?: boolean) => string | null
     handleExport: () => void
     handleExportWithoutHistory: () => void
-    resolverRef: React.Ref<((value: string) => void) | null>
-    drawioRef: React.Ref<DrawIoEmbedRef | null>
+    resolverRef: React.MutableRefObject<((value: string) => void) | null>
+    drawioRef: React.MutableRefObject<DrawIoEmbedRef | null>
     handleDiagramExport: (data: any) => void
+    handleDiagramAutoSave: (data: { xml?: string }) => void
     clearDiagram: () => void
     saveDiagramToFile: (
         filename: string,
         format: ExportFormat,
         sessionId?: string,
+        successMessage?: string,
     ) => void
-    saveDiagramToStorage: () => Promise<void>
+    getThumbnailSvg: () => Promise<string | null>
+    captureValidationPng: () => Promise<string | null>
     isDrawioReady: boolean
     onDrawioLoad: () => void
     resetDrawioReady: () => void
@@ -41,71 +49,51 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
         { svg: string; xml: string }[]
     >([])
     const [isDrawioReady, setIsDrawioReady] = useState(false)
-    const [canSaveDiagram, setCanSaveDiagram] = useState(false)
     const [showSaveDialog, setShowSaveDialog] = useState(false)
     const hasCalledOnLoadRef = useRef(false)
     const drawioRef = useRef<DrawIoEmbedRef | null>(null)
     const resolverRef = useRef<((value: string) => void) | null>(null)
+    // Resolver for PNG export (used for VLM validation)
+    const pngResolverRef = useRef<((value: string) => void) | null>(null)
     // Track if we're expecting an export for history (user-initiated)
     const expectHistoryExportRef = useRef<boolean>(false)
-    // Track if diagram has been restored from localStorage
-    const hasDiagramRestoredRef = useRef<boolean>(false)
+    // Track latest chartXML for restoration after remount
+    const chartXMLRef = useRef<string>("")
 
     const onDrawioLoad = () => {
         // Only set ready state once to prevent infinite loops
         if (hasCalledOnLoadRef.current) return
         hasCalledOnLoadRef.current = true
-        // console.log("[DiagramContext] DrawIO loaded, setting ready state")
         setIsDrawioReady(true)
     }
 
     const resetDrawioReady = () => {
-        // console.log("[DiagramContext] Resetting DrawIO ready state")
         hasCalledOnLoadRef.current = false
         setIsDrawioReady(false)
     }
 
-    // Restore diagram XML when DrawIO becomes ready
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadDiagram uses refs internally and is stable
+    // Keep chartXMLRef in sync with state for restoration after remount
     useEffect(() => {
-        // Reset restore flag when DrawIO is not ready (e.g., theme/UI change remounts it)
-        if (!isDrawioReady) {
-            hasDiagramRestoredRef.current = false
-            setCanSaveDiagram(false)
-            return
-        }
-        if (hasDiagramRestoredRef.current) return
-        hasDiagramRestoredRef.current = true
+        chartXMLRef.current = chartXML
+    }, [chartXML])
 
-        try {
-            const savedDiagramXml = localStorage.getItem(
-                STORAGE_DIAGRAM_XML_KEY,
-            )
-            if (savedDiagramXml) {
-                // Skip validation for trusted saved diagrams
-                loadDiagram(savedDiagramXml, true)
-            }
-        } catch (error) {
-            console.error("Failed to restore diagram from localStorage:", error)
-        }
-
-        // Allow saving after restore is complete
-        setTimeout(() => {
-            setCanSaveDiagram(true)
-        }, 500)
-    }, [isDrawioReady])
-
-    // Save diagram XML to localStorage whenever it changes (debounced)
+    // Restore diagram when DrawIO becomes ready after remount (e.g., theme/UI change)
+    // Also restore when chartXML changes while DrawIO is ready (e.g., session loaded after iframe ready)
+    const lastRestoredXmlRef = useRef<string>("")
     useEffect(() => {
-        if (!canSaveDiagram) return
-        if (!chartXML || chartXML.length <= 300) return
-
-        const timeoutId = setTimeout(() => {
-            localStorage.setItem(STORAGE_DIAGRAM_XML_KEY, chartXML)
-        }, 1000)
-
-        return () => clearTimeout(timeoutId)
-    }, [chartXML, canSaveDiagram])
+        if (!isDrawioReady || !drawioRef.current) return
+        // Only load if we have a real diagram and it's different from what we already loaded
+        if (
+            isRealDiagram(chartXML) &&
+            chartXML !== lastRestoredXmlRef.current
+        ) {
+            lastRestoredXmlRef.current = chartXML
+            drawioRef.current.load({ xml: chartXML })
+        } else if (!isRealDiagram(chartXML)) {
+            // Reset when diagram is cleared so a future restore can re-load the same XML.
+            lastRestoredXmlRef.current = ""
+        }
+    }, [isDrawioReady, chartXML])
 
     // Track if we're expecting an export for file save (stores raw export data)
     const saveResolverRef = useRef<{
@@ -132,27 +120,63 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
         }
     }
 
-    // Save current diagram to localStorage (used before theme/UI changes)
-    const saveDiagramToStorage = async (): Promise<void> => {
-        if (!drawioRef.current) return
+    // Get current diagram as SVG for thumbnail (used by session storage)
+    const getThumbnailSvg = async (): Promise<string | null> => {
+        if (!drawioRef.current) return null
+        // Don't export if diagram is empty
+        if (!isRealDiagram(chartXML)) return null
 
         try {
-            const currentXml = await Promise.race([
+            const svgData = await Promise.race([
                 new Promise<string>((resolve) => {
                     resolverRef.current = resolve
                     drawioRef.current?.exportDiagram({ format: "xmlsvg" })
                 }),
                 new Promise<string>((_, reject) =>
-                    setTimeout(() => reject(new Error("Export timeout")), 2000),
+                    setTimeout(() => reject(new Error("Export timeout")), 3000),
                 ),
             ])
 
-            // Only save if diagram has meaningful content (not empty template)
-            if (currentXml && currentXml.length > 300) {
-                localStorage.setItem(STORAGE_DIAGRAM_XML_KEY, currentXml)
+            // Update latestSvg so it's available for future saves
+            if (svgData?.includes("<svg")) {
+                setLatestSvg(svgData)
+                return svgData
             }
-        } catch (error) {
-            console.error("Failed to save diagram to storage:", error)
+            return null
+        } catch {
+            // Timeout is expected occasionally - don't log as error
+            return null
+        }
+    }
+
+    // Capture current diagram as PNG for VLM validation
+    const captureValidationPng = async (): Promise<string | null> => {
+        if (!drawioRef.current) return null
+        // Don't export if diagram is empty
+        if (!isRealDiagram(chartXML)) return null
+
+        try {
+            const pngData = await Promise.race([
+                new Promise<string>((resolve) => {
+                    pngResolverRef.current = resolve
+                    drawioRef.current?.exportDiagram({ format: "png" })
+                }),
+                new Promise<string>((_, reject) =>
+                    setTimeout(
+                        () => reject(new Error("PNG export timeout")),
+                        5000,
+                    ),
+                ),
+            ])
+
+            // PNG data should be a base64 data URL
+            if (pngData?.startsWith("data:image/png")) {
+                return pngData
+            }
+            return null
+        } catch {
+            // Timeout is expected occasionally - don't log as error
+            return null
         }
     }
 
@@ -195,6 +219,13 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
     }
 
     const handleDiagramExport = (data: any) => {
+        // Handle PNG export for VLM validation
+        if (pngResolverRef.current && data.data?.startsWith("data:image/png")) {
+            pngResolverRef.current(data.data)
+            pngResolverRef.current = null
+            return
+        }
+
         // Handle save to file if requested (process raw data before extraction)
         if (saveResolverRef.current.resolver) {
             const format = saveResolverRef.current.format
@@ -235,6 +266,16 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
         }
     }
 
+    const handleDiagramAutoSave = (data: { xml?: string }) => {
+        if (!data?.xml) return
+        // Don't overwrite a pending restore - if we have a real diagram in state
+        // but DrawIO isn't ready yet, it means we're waiting to restore
+        if (!isDrawioReady && isRealDiagram(chartXML)) {
+            return
+        }
+        setChartXML(data.xml)
+    }
+
     const clearDiagram = () => {
         const emptyDiagram = `<mxfile><diagram name="Page-1" id="page-1"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel></diagram></mxfile>`
         // Skip validation for trusted internal template (loadDiagram also sets chartXML)
@@ -247,6 +288,7 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
         filename: string,
         format: ExportFormat,
         sessionId?: string,
+        successMessage?: string,
     ) => {
         if (!drawioRef.current) {
             console.warn("Draw.io editor not ready")
@@ -273,9 +315,6 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
                     fileContent = xmlContent
                     mimeType = "application/xml"
                     extension = ".drawio"
-
-                    // Save to localStorage when user manually saves
-                    localStorage.setItem(STORAGE_DIAGRAM_XML_KEY, xmlContent)
                 } else if (format === "png") {
                     // PNG data comes as base64 data URL
                     fileContent = exportData
@@ -310,6 +349,14 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
                 document.body.appendChild(a)
                 a.click()
                 document.body.removeChild(a)
+
+                // Show success toast after download is initiated
+                if (successMessage) {
+                    toast.success(successMessage, {
+                        position: "bottom-left",
+                        duration: 2500,
+                    })
+                }
 
                 // Delay URL revocation to ensure download completes
                 if (!url.startsWith("data:")) {
@@ -346,15 +393,18 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
                 chartXML,
                 latestSvg,
                 diagramHistory,
+                setDiagramHistory,
                 loadDiagram,
                 handleExport,
                 handleExportWithoutHistory,
                 resolverRef,
                 drawioRef,
                 handleDiagramExport,
+                handleDiagramAutoSave,
                 clearDiagram,
                 saveDiagramToFile,
-                saveDiagramToStorage,
+                getThumbnailSvg,
+                captureValidationPng,
                 isDrawioReady,
                 onDrawioLoad,
                 resetDrawioReady,

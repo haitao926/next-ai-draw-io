@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron"
+import { rebuildAppMenu } from "./app-menu"
 import {
     applyPresetToEnv,
     type ConfigPreset,
@@ -7,10 +8,18 @@ import {
     getAllPresets,
     getCurrentPreset,
     getCurrentPresetId,
+    getUserLocale,
     setCurrentPreset,
+    setUserLocale,
     updatePreset,
 } from "./config-manager"
 import { restartNextServer } from "./next-server"
+import {
+    applyProxyToEnv,
+    getProxyConfig,
+    type ProxyConfig,
+    saveProxyConfig,
+} from "./proxy-manager"
 
 /**
  * Allowed configuration keys for presets
@@ -209,4 +218,68 @@ export function registerIpcHandlers(): void {
             return setCurrentPreset(id)
         },
     )
+
+    // ==================== Proxy Settings ====================
+
+    ipcMain.handle("get-proxy", () => {
+        return getProxyConfig()
+    })
+
+    ipcMain.handle("set-proxy", async (_event, config: ProxyConfig) => {
+        try {
+            // Save config to file
+            saveProxyConfig(config)
+
+            // Apply to current process environment
+            applyProxyToEnv()
+
+            const isDev = process.env.NODE_ENV === "development"
+
+            if (isDev) {
+                // In development, env vars are already applied
+                // Next.js dev server may need manual restart
+                return { success: true, devMode: true }
+            }
+
+            // Production: restart Next.js server to pick up new env vars
+            await restartNextServer()
+            return { success: true }
+        } catch (error) {
+            return {
+                success: false,
+                error:
+                    error instanceof Error
+                        ? error.message
+                        : "Failed to apply proxy settings",
+            }
+        }
+    })
+
+    // ==================== User Locale ====================
+
+    ipcMain.handle("get-user-locale", () => {
+        return getUserLocale()
+    })
+
+    ipcMain.handle("set-user-locale", (_event, locale: string) => {
+        // Validate locale is one of the supported values
+        if (!["en", "zh", "ja", "zh-Hant"].includes(locale)) {
+            return { success: false, error: "Invalid locale" }
+        }
+
+        try {
+            setUserLocale(locale as "en" | "zh" | "ja" | "zh-Hant")
+            // Rebuild the menu to reflect the new locale
+            rebuildAppMenu()
+            return { success: true }
+        } catch (error) {
+            return {
+                success: false,
+                error:
+                    error instanceof Error
+                        ? error.message
+                        : "Failed to set locale",
+            }
+        }
+    })
 }

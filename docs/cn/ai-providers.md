@@ -13,7 +13,7 @@
 
 ### 豆包 (字节跳动火山引擎)
 
-> **免费 Token**：在 [火山引擎 ARK 平台](https://console.volcengine.com/ark/region:ark+cn-beijing/overview?briefPage=0&briefType=introduce&type=new&utm_campaign=doubao&utm_content=aidrawio&utm_medium=github&utm_source=coopensrc&utm_term=project) 注册，即可获得所有模型 50 万免费 Token！
+> **免费 Token**：在 [火山引擎 ARK 平台](https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=Z9Z3LDTJ&utm_campaign=drawio&utm_content=drawio&utm_medium=devrel&utm_source=OWO&utm_term=drawio) 注册，即可获得所有模型 50 万免费 Token！
 
 ```bash
 DOUBAO_API_KEY=your_api_key
@@ -152,6 +152,19 @@ AI_PROVIDER=ollama
 AI_MODEL=llama3.2
 ```
 
+### ModelScope
+
+```bash
+MODELSCOPE_API_KEY=your_api_key
+AI_MODEL=Qwen/Qwen3-235B-A22B-Instruct-2507
+```
+
+可选的自定义端点：
+
+```bash
+MODELSCOPE_BASE_URL=https://your-custom-endpoint
+```
+
 可选的自定义 URL：
 
 ```bash
@@ -194,6 +207,85 @@ AI_MODEL=openai/gpt-4o
 
 从 [Vercel AI Gateway 仪表板](https://vercel.com/ai-gateway) 获取您的 API 密钥。
 
+### MiniMax
+
+MiniMax 支持两种 API 格式：
+- **Anthropic 兼容**（`/anthropic` 端点）— 推荐，支持 interleaved thinking
+- **OpenAI 兼容**（`/v1` 端点）— 标准 OpenAI 聊天补全格式
+
+```bash
+MINIMAX_API_KEY=your_api_key
+AI_MODEL=MiniMax-M2.7
+```
+
+可选配置：
+
+```bash
+# 中国大陆版，Anthropic 兼容（默认）
+MINIMAX_BASE_URL=https://api.minimaxi.com/anthropic
+
+# 中国大陆版，OpenAI 兼容
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+
+# 国际版，Anthropic 兼容
+MINIMAX_BASE_URL=https://api.minimax.io/anthropic
+
+# 国际版，OpenAI 兼容
+MINIMAX_BASE_URL=https://api.minimax.io/v1
+```
+
+### GLM (智谱 AI)
+
+```bash
+GLM_API_KEY=your_api_key
+AI_MODEL=glm-4
+```
+
+可选的自定义端点：
+
+```bash
+GLM_BASE_URL=https://your-custom-endpoint
+```
+
+### Qwen (阿里云通义千问)
+
+```bash
+QWEN_API_KEY=your_api_key
+AI_MODEL=qwen-turbo
+```
+
+可选的自定义端点：
+
+```bash
+QWEN_BASE_URL=https://your-custom-endpoint
+```
+
+### Kimi (月之暗面 Moonshot AI)
+
+```bash
+KIMI_API_KEY=your_api_key
+AI_MODEL=kimi-latest
+```
+
+可选的自定义端点：
+
+```bash
+KIMI_BASE_URL=https://your-custom-endpoint
+```
+
+### Qiniu (七牛云)
+
+```bash
+QINIU_API_KEY=your_api_key
+AI_MODEL=your_model_id
+```
+
+可选的自定义端点：
+
+```bash
+QINIU_BASE_URL=https://your-custom-endpoint
+```
+
 ## 自动检测
 
 如果您只配置了**一个**提供商的 API 密钥，系统将自动检测并使用该提供商。无需设置 `AI_PROVIDER`。
@@ -201,8 +293,65 @@ AI_MODEL=openai/gpt-4o
 如果您配置了**多个** API 密钥，则必须显式设置 `AI_PROVIDER`：
 
 ```bash
-AI_PROVIDER=google  # 或：openai, anthropic, deepseek, siliconflow, doubao, azure, bedrock, openrouter, ollama, gateway, sglang
+AI_PROVIDER=google  # 或：openai, anthropic, deepseek, siliconflow, doubao, azure, bedrock, openrouter, ollama, gateway, sglang, modelscope, minimax, glm, qwen, kimi, qiniu
 ```
+
+## 服务端多模型配置
+
+管理员可以配置多个服务端模型，让所有用户无需提供个人 API Key 即可使用。
+
+### 配置方式
+
+**方式一：环境变量**（推荐用于云部署）
+
+设置 `AI_MODELS_CONFIG` 为 JSON 字符串：
+
+```bash
+AI_MODELS_CONFIG='{"providers":[{"name":"OpenAI","provider":"openai","models":["gpt-4o"],"default":true}]}'
+```
+
+**方式二：配置文件**
+
+在项目根目录创建 `ai-models.json` 文件（或通过 `AI_MODELS_CONFIG_PATH` 指定路径）。
+
+### 配置示例
+
+```json
+{
+  "providers": [
+    {
+      "name": "OpenAI Production",
+      "provider": "openai",
+      "models": ["gpt-4o", "gpt-4o-mini"],
+      "default": true
+    },
+    {
+      "name": "Custom DeepSeek",
+      "provider": "deepseek",
+      "models": ["deepseek-chat"],
+      "apiKeyEnv": "MY_DEEPSEEK_KEY",
+      "baseUrlEnv": "MY_DEEPSEEK_URL"
+    }
+  ]
+}
+```
+
+### 字段说明
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `name` | 是 | 显示名称（支持同一提供商多个配置） |
+| `provider` | 是 | 提供商类型（`openai`, `anthropic`, `google`, `bedrock` 等） |
+| `models` | 是 | 模型 ID 列表 |
+| `default` | 否 | 设为 `true` 表示默认选中该提供商的第一个模型 |
+| `apiKeyEnv` | 否 | 自定义 API Key 环境变量名（默认使用提供商标准变量如 `OPENAI_API_KEY`） |
+| `baseUrlEnv` | 否 | 自定义 Base URL 环境变量名 |
+
+### 说明
+
+- API Key 和凭证通过环境变量提供。默认使用标准变量名（如 `OPENAI_API_KEY`），也可通过 `apiKeyEnv` 指定自定义变量名。
+- `name` 字段允许同一提供商多个配置（例如 "OpenAI Production" 和 "OpenAI Staging" 都使用 `provider: "openai"` 但 `apiKeyEnv` 不同）。
+- 如果配置不存在，应用会回退到 `AI_PROVIDER`/`AI_MODEL` 环境变量配置。
 
 ## 模型能力要求
 

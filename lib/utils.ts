@@ -1,9 +1,31 @@
 import { type ClassValue, clsx } from "clsx"
 import * as pako from "pako"
 import { twMerge } from "tailwind-merge"
+import type { DiagramOperation } from "@/components/chat/types"
+
+export type { DiagramOperation }
 
 export function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs))
+}
+
+// ============================================================================
+// Diagram Constants
+// ============================================================================
+
+/**
+ * Minimum length for a "real" diagram XML (not just empty template).
+ * Empty mxfile templates are ~147-300 chars; real diagrams are larger.
+ */
+export const MIN_REAL_DIAGRAM_LENGTH = 300
+
+/**
+ * Check if diagram XML represents a real diagram (not just empty template).
+ * @param xml - The diagram XML string to check
+ * @returns true if the XML is a real diagram with content
+ */
+export function isRealDiagram(xml: string | undefined | null): boolean {
+    return !!xml && xml.length > MIN_REAL_DIAGRAM_LENGTH
 }
 
 // ============================================================================
@@ -453,12 +475,6 @@ export function replaceNodes(currentXML: string, nodes: string): string {
 // ============================================================================
 // ID-based Diagram Operations
 // ============================================================================
-
-export interface DiagramOperation {
-    operation: "update" | "add" | "delete"
-    cell_id: string
-    new_xml?: string
-}
 
 export interface OperationError {
     type: "update" | "add" | "delete"

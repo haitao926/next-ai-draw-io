@@ -1,7 +1,7 @@
 "use client"
 
-import Image from "next/image"
 import { useState } from "react"
+import Image from "@/components/image-with-basepath"
 import { Button } from "@/components/ui/button"
 import {
     Dialog,
@@ -43,7 +43,7 @@ export function HistoryDialog({
 
     return (
         <Dialog open={showHistory} onOpenChange={onToggleHistory}>
-            <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+            <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto scrollbar-thin">
                 <DialogHeader>
                     <DialogTitle>{dict.history.title}</DialogTitle>
                     <DialogDescription>

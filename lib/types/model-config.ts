@@ -4,8 +4,10 @@ export type ProviderName =
     | "openai"
     | "anthropic"
     | "google"
+    | "vertexai"
     | "azure"
     | "bedrock"
+    | "ollama"
     | "openrouter"
     | "deepseek"
     | "siliconflow"
@@ -13,6 +15,13 @@ export type ProviderName =
     | "gateway"
     | "edgeone"
     | "doubao"
+    | "modelscope"
+    | "glm"
+    | "qwen"
+    | "qiniu"
+    | "kimi"
+    | "minimax"
+    | "novita"
 
 // Individual model configuration
 export interface ModelConfig {
@@ -34,6 +43,9 @@ export interface ProviderConfig {
     awsSecretAccessKey?: string
     awsRegion?: string
     awsSessionToken?: string // Optional, for temporary credentials
+    // Vertex AI specific fields
+    vertexApiKey?: string // Express Mode API key
+
     models: ModelConfig[]
     validated?: boolean // Has API key been validated
 }
@@ -48,7 +60,7 @@ export interface MultiModelConfig {
 
 // Flattened model for dropdown display
 export interface FlattenedModel {
-    id: string // Model config UUID
+    id: string // Model config UUID or synthetic server ID (e.g., "server:provider:modelId")
     modelId: string // Actual model ID
     provider: ProviderName
     providerLabel: string // Provider display name
@@ -59,7 +71,38 @@ export interface FlattenedModel {
     awsSecretAccessKey?: string
     awsRegion?: string
     awsSessionToken?: string
+    // Vertex AI specific fields
+    vertexApiKey?: string // Express Mode API key
+
     validated?: boolean // Has this model been validated
+    // Source of this model config: user-defined (client) or server-defined
+    source?: "user" | "server"
+    // Whether this model is the server default (matches AI_MODEL env var)
+    isDefault?: boolean
+    // Custom env var name(s) for server models
+    // Can be a single string or array of strings for load balancing
+    apiKeyEnv?: string | string[]
+    baseUrlEnv?: string
+}
+
+// Map provider names to models.dev logo names
+export const PROVIDER_LOGO_MAP: Record<string, string> = {
+    openai: "openai",
+    anthropic: "anthropic",
+    google: "google",
+    azure: "azure",
+    bedrock: "amazon-bedrock",
+    openrouter: "openrouter",
+    deepseek: "deepseek",
+    siliconflow: "siliconflow",
+    sglang: "openai", // SGLang is OpenAI-compatible
+    gateway: "vercel",
+    edgeone: "tencent-cloud",
+    vertexai: "google",
+    doubao: "bytedance",
+    modelscope: "modelscope",
+    minimax: "minimax",
+    novita: "novita",
 }
 
 // Provider metadata
@@ -67,34 +110,85 @@ export const PROVIDER_INFO: Record<
     ProviderName,
     { label: string; defaultBaseUrl?: string }
 > = {
-    openai: { label: "OpenAI" },
+    openai: {
+        label: "OpenAI",
+        defaultBaseUrl: "https://api.openai.com/v1",
+    },
     anthropic: {
         label: "Anthropic",
         defaultBaseUrl: "https://api.anthropic.com/v1",
     },
-    google: { label: "Google" },
-    azure: { label: "Azure OpenAI" },
+    google: {
+        label: "Google",
+        defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    },
+    vertexai: { label: "Google Vertex AI" },
+    azure: {
+        label: "Azure OpenAI",
+        defaultBaseUrl: "https://your-resource.openai.azure.com/openai",
+    },
     bedrock: { label: "Amazon Bedrock" },
-    openrouter: { label: "OpenRouter" },
-    deepseek: { label: "DeepSeek" },
+    ollama: {
+        label: "Ollama",
+        defaultBaseUrl: "https://ollama.com/api",
+    },
+    openrouter: {
+        label: "OpenRouter",
+        defaultBaseUrl: "https://openrouter.ai/api/v1",
+    },
+    deepseek: {
+        label: "DeepSeek",
+        defaultBaseUrl: "https://api.deepseek.com/v1",
+    },
     siliconflow: {
         label: "SiliconFlow",
-        defaultBaseUrl: "https://api.siliconflow.com/v1",
+        defaultBaseUrl: "https://api.siliconflow.cn/v1",
     },
     sglang: {
         label: "SGLang",
         defaultBaseUrl: "http://127.0.0.1:8000/v1",
     },
-    gateway: { label: "AI Gateway" },
+    gateway: {
+        label: "AI Gateway",
+        defaultBaseUrl: "https://ai-gateway.vercel.sh/v1/ai",
+    },
     edgeone: { label: "EdgeOne Pages" },
     doubao: {
         label: "Doubao (ByteDance)",
         defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/v3",
     },
+    modelscope: {
+        label: "ModelScope",
+        defaultBaseUrl: "https://api-inference.modelscope.cn/v1",
+    },
+    glm: {
+        label: "GLM (Zhipu)",
+        defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    },
+    qwen: {
+        label: "Qwen (Alibaba)",
+        defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    },
+    qiniu: {
+        label: "Qiniu",
+        defaultBaseUrl: "https://api.qnaigc.com/v1",
+    },
+    kimi: {
+        label: "Kimi (Moonshot)",
+        defaultBaseUrl: "https://api.moonshot.cn/v1",
+    },
+    minimax: {
+        label: "MiniMax",
+        defaultBaseUrl: "https://api.minimaxi.com/anthropic",
+    },
+    novita: {
+        label: "Novita AI",
+        defaultBaseUrl: "https://api.novita.ai/openai",
+    },
 }
 
 // Suggested models per provider for quick add
-export const SUGGESTED_MODELS: Record<ProviderName, string[]> = {
+export const SUGGESTED_MODELS: Partial<Record<ProviderName, string[]>> = {
     openai: [
         "gpt-5.2-pro",
         "gpt-5.2-chat-latest",
@@ -146,6 +240,17 @@ export const SUGGESTED_MODELS: Record<ProviderName, string[]> = {
         "gemini-1.5-flash",
         // Legacy
         "gemini-pro",
+    ],
+    vertexai: [
+        // Gemini 2.5 series
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        // Gemini 2.0 series
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-exp",
+        // Gemini 1.5 series
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
     ],
     azure: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-35-turbo"],
     bedrock: [
@@ -209,6 +314,7 @@ export const SUGGESTED_MODELS: Record<ProviderName, string[]> = {
         "Qwen/Qwen2.5-Coder-32B-Instruct",
         "Qwen/Qwen2.5-7B-Instruct",
         "Qwen/Qwen2-VL-72B-Instruct",
+        "qwen3.5-plus",
     ],
     sglang: [
         // SGLang is OpenAI-compatible, models depend on deployment
@@ -230,6 +336,31 @@ export const SUGGESTED_MODELS: Record<ProviderName, string[]> = {
         "doubao-1.5-pro-256k-250115",
         "doubao-pro-32k-241215",
         "doubao-pro-256k-241215",
+    ],
+    modelscope: [
+        // Qwen
+        "Qwen/Qwen2.5-72B-Instruct",
+        "Qwen/Qwen2.5-32B-Instruct",
+        "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "Qwen/Qwen3-VL-235B-A22B-Instruct",
+        "Qwen/Qwen3-32B",
+        "qwen3.5-plus",
+        // DeepSeek
+        "deepseek-ai/DeepSeek-R1-0528",
+        "deepseek-ai/DeepSeek-V3.2",
+    ],
+    minimax: [
+        // MiniMax models (Anthropic-compatible API)
+        "MiniMax-M2.7",
+        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5",
+        "MiniMax-M2.5-highspeed",
+    ],
+    novita: [
+        // Novita AI models (OpenAI-compatible API)
+        "moonshotai/kimi-k2.5",
+        "zai-org/glm-5",
+        "minimax/minimax-m2.5",
     ],
 }
 
@@ -267,7 +398,7 @@ export function createModelConfig(modelId: string): ModelConfig {
     }
 }
 
-// Get all models as flattened list for dropdown
+// Get all models as flattened list for dropdown (user-defined only)
 export function flattenModels(config: MultiModelConfig): FlattenedModel[] {
     const models: FlattenedModel[] = []
 
@@ -289,7 +420,12 @@ export function flattenModels(config: MultiModelConfig): FlattenedModel[] {
                 awsSecretAccessKey: provider.awsSecretAccessKey,
                 awsRegion: provider.awsRegion,
                 awsSessionToken: provider.awsSessionToken,
+                // Vertex AI fields
+                vertexApiKey: provider.vertexApiKey,
+
                 validated: model.validated,
+                source: "user",
+                isDefault: false,
             })
         }
     }

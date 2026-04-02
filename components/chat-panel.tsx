@@ -8,7 +8,7 @@ import {
     PanelRightOpen,
     Settings,
 } from "lucide-react"
-import Image from "next/image"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import type React from "react"
 import {
     useCallback,
@@ -21,28 +21,31 @@ import { flushSync } from "react-dom"
 import { Toaster, toast } from "sonner"
 import { ButtonWithTooltip } from "@/components/button-with-tooltip"
 import { ChatInput } from "@/components/chat-input"
+import Image from "@/components/image-with-basepath"
 import { ModelConfigDialog } from "@/components/model-config-dialog"
-import { ResetWarningModal } from "@/components/reset-warning-modal"
 import { SettingsDialog } from "@/components/settings-dialog"
 import { useDiagram } from "@/contexts/diagram-context"
 import { useDiagramToolHandlers } from "@/hooks/use-diagram-tool-handlers"
 import { useDictionary } from "@/hooks/use-dictionary"
 import { getSelectedAIConfig, useModelConfig } from "@/hooks/use-model-config"
+import { useSessionManager } from "@/hooks/use-session-manager"
+import { useValidateDiagram } from "@/hooks/use-validate-diagram"
 import { getApiEndpoint } from "@/lib/base-path"
 import { findCachedResponse } from "@/lib/cached-responses"
 import { formatMessage } from "@/lib/i18n/utils"
 import { isPdfFile, isTextFile } from "@/lib/pdf-utils"
+import { sanitizeMessages } from "@/lib/session-storage"
+import { STORAGE_KEYS } from "@/lib/storage"
+import type { UrlData } from "@/lib/url-utils"
 import { type FileData, useFileProcessor } from "@/lib/use-file-processor"
 import { useQuotaManager } from "@/lib/use-quota-manager"
-import { cn, formatXML } from "@/lib/utils"
+import { cn, formatXML, isRealDiagram } from "@/lib/utils"
+import type { ValidationState } from "./chat/ValidationCard"
 import { ChatMessageDisplay } from "./chat-message-display"
 import { DevXmlSimulator } from "./dev-xml-simulator"
 
 // localStorage keys for persistence
-const STORAGE_MESSAGES_KEY = "next-ai-draw-io-messages"
-const STORAGE_XML_SNAPSHOTS_KEY = "next-ai-draw-io-xml-snapshots"
 const STORAGE_SESSION_ID_KEY = "next-ai-draw-io-session-id"
-export const STORAGE_DIAGRAM_XML_KEY = "next-ai-draw-io-diagram-xml"
 
 // sessionStorage keys
 const SESSION_STORAGE_INPUT_KEY = "next-ai-draw-io-input"
@@ -70,13 +73,13 @@ interface ChatPanelProps {
     darkMode: boolean
     onToggleDarkMode: () => void
     isMobile?: boolean
-    onCloseProtectionChange?: (enabled: boolean) => void
 }
 
 // Constants for tool states
 const TOOL_ERROR_STATE = "output-error" as const
 const DEBUG = process.env.NODE_ENV === "development"
-const MAX_AUTO_RETRY_COUNT = 1
+// Increased to 3 to support VLM validation retries (matches MAX_VALIDATION_RETRIES)
+const MAX_AUTO_RETRY_COUNT = 3
 
 const MAX_CONTINUATION_RETRY_COUNT = 2 // Limit for truncation continuation retries
 
@@ -111,7 +114,6 @@ export default function ChatPanel({
     darkMode,
     onToggleDarkMode,
     isMobile = false,
-    onCloseProtectionChange,
 }: ChatPanelProps) {
     const {
         loadDiagram: onDisplayChart,
@@ -119,57 +121,85 @@ export default function ChatPanel({
         handleExportWithoutHistory,
         resolverRef,
         chartXML,
+        latestSvg,
         clearDiagram,
+        getThumbnailSvg,
+        captureValidationPng,
+        diagramHistory,
+        setDiagramHistory,
     } = useDiagram()
 
     const dict = useDictionary()
+    const router = useRouter()
+    const pathname = usePathname()
+    const searchParams = useSearchParams()
+    const urlSessionId = searchParams.get("session")
 
     const onFetchChart = (saveToHistory = true) => {
         return Promise.race([
             new Promise<string>((resolve) => {
-                if (resolverRef && "current" in resolverRef) {
-                    resolverRef.current = resolve
-                }
+                resolverRef.current = resolve
                 if (saveToHistory) {
                     onExport()
                 } else {
                     handleExportWithoutHistory()
                 }
             }),
-            new Promise<string>((_, reject) =>
-                setTimeout(
-                    () =>
-                        reject(
-                            new Error(
-                                "Chart export timed out after 10 seconds",
-                            ),
-                        ),
-                    10000,
-                ),
-            ),
+            new Promise<string>((_, reject) => {
+                const currentResolver = resolverRef.current
+                setTimeout(() => {
+                    if (resolverRef.current === currentResolver) {
+                        resolverRef.current = null
+                    }
+                    reject(new Error("Chart export timed out after 10 seconds"))
+                }, 10000)
+            }),
         ])
     }
 
     // File processing using extracted hook
     const { files, pdfData, handleFileChange, setFiles } = useFileProcessor()
+    const [urlData, setUrlData] = useState<Map<string, UrlData>>(new Map())
 
     const [showSettingsDialog, setShowSettingsDialog] = useState(false)
     const [showModelConfigDialog, setShowModelConfigDialog] = useState(false)
 
     // Model configuration hook
     const modelConfig = useModelConfig()
+
+    // Session manager for chat history (pass URL session ID for restoration)
+    const sessionManager = useSessionManager({ initialSessionId: urlSessionId })
+
     const [input, setInput] = useState("")
     const [dailyRequestLimit, setDailyRequestLimit] = useState(0)
     const [dailyTokenLimit, setDailyTokenLimit] = useState(0)
     const [tpmLimit, setTpmLimit] = useState(0)
-    const [showNewChatDialog, setShowNewChatDialog] = useState(false)
     const [minimalStyle, setMinimalStyle] = useState(false)
+    const [vlmValidationEnabled, setVlmValidationEnabled] = useState(false)
+    const [customSystemMessage, setCustomSystemMessage] = useState("")
+    const [shouldFocusInput, setShouldFocusInput] = useState(false)
 
     // Restore input from sessionStorage on mount (when ChatPanel remounts due to key change)
     useEffect(() => {
         const savedInput = sessionStorage.getItem(SESSION_STORAGE_INPUT_KEY)
         if (savedInput) {
             setInput(savedInput)
+        }
+    }, [])
+
+    // Load VLM validation setting from localStorage on mount
+    useEffect(() => {
+        const stored = localStorage.getItem(STORAGE_KEYS.vlmValidationEnabled)
+        if (stored !== null) {
+            setVlmValidationEnabled(stored === "true")
+        }
+    }, [])
+
+    // Load custom system message from localStorage on mount
+    useEffect(() => {
+        const stored = localStorage.getItem(STORAGE_KEYS.customSystemMessage)
+        if (stored !== null) {
+            setCustomSystemMessage(stored)
         }
     }, [])
 
@@ -222,9 +252,21 @@ export default function ChatPanel({
 
     // Ref to track latest chartXML for use in callbacks (avoids stale closure)
     const chartXMLRef = useRef(chartXML)
+    // Track session ID that was loaded without a diagram (to prevent thumbnail contamination)
+    const justLoadedSessionIdRef = useRef<string | null>(null)
     useEffect(() => {
         chartXMLRef.current = chartXML
+        // Clear the no-diagram flag when a diagram is generated
+        if (chartXML) {
+            justLoadedSessionIdRef.current = null
+        }
     }, [chartXML])
+
+    // Ref to track latest SVG for thumbnail generation
+    const latestSvgRef = useRef(latestSvg)
+    useEffect(() => {
+        latestSvgRef.current = latestSvg
+    }, [latestSvg])
 
     // Ref to track consecutive auto-retry count (reset on user action)
     const autoRetryCountRef = useRef(0)
@@ -248,6 +290,52 @@ export default function ChatPanel({
     > | null>(null)
     const LOCAL_STORAGE_DEBOUNCE_MS = 1000 // Save at most once per second
 
+    // Validation state for displaying VLM validation progress
+    // Key: toolCallId, Value: ValidationState
+    const [validationStates, setValidationStates] = useState<
+        Record<string, ValidationState>
+    >({})
+
+    // Callback to update validation state from tool handler
+    const handleValidationStateChange = useCallback(
+        (toolCallId: string, state: ValidationState) => {
+            setValidationStates((prev) => ({
+                ...prev,
+                [toolCallId]: state,
+            }))
+        },
+        [],
+    )
+
+    // Handler for VLM validation setting change
+    const handleVlmValidationChange = useCallback((value: boolean) => {
+        setVlmValidationEnabled(value)
+        localStorage.setItem(STORAGE_KEYS.vlmValidationEnabled, String(value))
+    }, [])
+
+    // Handler for custom system message change
+    const handleCustomSystemMessageChange = useCallback((value: string) => {
+        setCustomSystemMessage(value)
+        localStorage.setItem(STORAGE_KEYS.customSystemMessage, value)
+    }, [])
+
+    // Ref to store the sendMessage function for use in callbacks
+    const sendMessageRef = useRef<typeof sendMessage | null>(null)
+
+    // Callback to improve diagram with validation suggestions
+    const handleImproveWithSuggestions = useCallback((feedback: string) => {
+        if (sendMessageRef.current) {
+            // Send the feedback as a new user message to trigger regeneration
+            sendMessageRef.current({
+                role: "user",
+                parts: [{ type: "text", text: feedback }],
+            })
+        }
+    }, [])
+
+    // VLM validation hook using AI SDK's useObject
+    const { validateWithFallback } = useValidateDiagram()
+
     // Diagram tool handlers (display_diagram, edit_diagram, append_diagram)
     const { handleToolCall } = useDiagramToolHandlers({
         partialXmlRef,
@@ -256,187 +344,167 @@ export default function ChatPanel({
         onDisplayChart,
         onFetchChart,
         onExport,
+        captureValidationPng,
+        validateDiagram: validateWithFallback,
+        enableVlmValidation: vlmValidationEnabled,
+        sessionId,
+        onValidationStateChange: handleValidationStateChange,
     })
 
-    const { messages, sendMessage, addToolOutput, status, error, setMessages } =
-        useChat({
-            transport: new DefaultChatTransport({
-                api: getApiEndpoint("/api/chat"),
-            }),
-            onToolCall: async ({ toolCall }) => {
-                await handleToolCall({ toolCall }, addToolOutput)
-            },
-            onError: (error) => {
-                // Handle server-side quota limit (429 response)
-                // AI SDK puts the full response body in error.message for non-OK responses
-                try {
-                    const data = JSON.parse(error.message)
-                    if (data.type === "request") {
-                        quotaManager.showQuotaLimitToast(data.used, data.limit)
-                        return
-                    }
-                    if (data.type === "token") {
-                        quotaManager.showTokenLimitToast(data.used, data.limit)
-                        return
-                    }
-                    if (data.type === "tpm") {
-                        quotaManager.showTPMLimitToast(data.limit)
-                        return
-                    }
-                } catch {
-                    // Not JSON, fall through to string matching for backwards compatibility
+    const {
+        messages,
+        sendMessage,
+        addToolOutput,
+        status,
+        error,
+        setMessages,
+        stop,
+    } = useChat({
+        transport: new DefaultChatTransport({
+            api: getApiEndpoint("/api/chat"),
+        }),
+        onToolCall: async ({ toolCall }) => {
+            await handleToolCall({ toolCall }, addToolOutput)
+        },
+        onError: (error) => {
+            // Handle server-side quota limit (429 response)
+            // AI SDK puts the full response body in error.message for non-OK responses
+            try {
+                const data = JSON.parse(error.message)
+                if (data.type === "request") {
+                    quotaManager.showQuotaLimitToast(data.used, data.limit)
+                    return
                 }
+                if (data.type === "token") {
+                    quotaManager.showTokenLimitToast(data.used, data.limit)
+                    return
+                }
+                if (data.type === "tpm") {
+                    quotaManager.showTPMLimitToast(data.limit)
+                    return
+                }
+            } catch {
+                // Not JSON, fall through to string matching for backwards compatibility
+            }
 
-                // Fallback to string matching
-                if (error.message.includes("Daily request limit")) {
-                    quotaManager.showQuotaLimitToast()
-                    return
+            // Fallback to string matching
+            if (error.message.includes("Daily request limit")) {
+                quotaManager.showQuotaLimitToast()
+                return
+            }
+            if (error.message.includes("Daily token limit")) {
+                quotaManager.showTokenLimitToast()
+                return
+            }
+            if (
+                error.message.includes("Rate limit exceeded") ||
+                error.message.includes("tokens per minute")
+            ) {
+                quotaManager.showTPMLimitToast()
+                return
+            }
+
+            // Silence access code error in console since it's handled by UI
+            if (!error.message.includes("Invalid or missing access code")) {
+                console.error("Chat error:", error)
+            }
+
+            // Translate technical errors into user-friendly messages
+            // The server now handles detailed error messages, so we can display them directly.
+            // But we still handle connection/network errors that happen before reaching the server.
+            let friendlyMessage = error.message
+
+            // Simple check for network errors if message is generic
+            if (friendlyMessage === "Failed to fetch") {
+                friendlyMessage = "Network error. Please check your connection."
+            }
+
+            // Truncated tool input error (model output limit too low)
+            if (friendlyMessage.includes("toolUse.input is invalid")) {
+                friendlyMessage =
+                    "Output was truncated before the diagram could be generated. Try a simpler request or increase the maxOutputLength."
+            }
+
+            // Translate image not supported error
+            if (
+                friendlyMessage.includes("image content block") ||
+                friendlyMessage.toLowerCase().includes("image_url")
+            ) {
+                friendlyMessage = "This model doesn't support image input."
+            }
+
+            // Add system message for error so it can be cleared
+            setMessages((currentMessages) => {
+                const errorMessage = {
+                    id: `error-${Date.now()}`,
+                    role: "system" as const,
+                    content: friendlyMessage,
+                    parts: [{ type: "text" as const, text: friendlyMessage }],
                 }
-                if (error.message.includes("Daily token limit")) {
-                    quotaManager.showTokenLimitToast()
-                    return
-                }
+                return [...currentMessages, errorMessage]
+            })
+
+            if (error.message.includes("Invalid or missing access code")) {
+                // Show settings dialog to help user fix it
+                setShowSettingsDialog(true)
+            }
+        },
+        onFinish: () => {},
+        sendAutomaticallyWhen: ({ messages }) => {
+            const isInContinuationMode = partialXmlRef.current.length > 0
+
+            const shouldRetry = hasToolErrors(
+                messages as unknown as ChatMessage[],
+            )
+
+            if (!shouldRetry) {
+                // No error, reset retry count and clear state
+                autoRetryCountRef.current = 0
+                continuationRetryCountRef.current = 0
+                partialXmlRef.current = ""
+                return false
+            }
+
+            // Continuation mode: limited retries for truncation handling
+            if (isInContinuationMode) {
                 if (
-                    error.message.includes("Rate limit exceeded") ||
-                    error.message.includes("tokens per minute")
+                    continuationRetryCountRef.current >=
+                    MAX_CONTINUATION_RETRY_COUNT
                 ) {
-                    quotaManager.showTPMLimitToast()
-                    return
-                }
-
-                // Silence access code error in console since it's handled by UI
-                if (!error.message.includes("Invalid or missing access code")) {
-                    console.error("Chat error:", error)
-                    // Debug: Log messages structure when error occurs
-                    console.log("[onError] messages count:", messages.length)
-                    messages.forEach((msg, idx) => {
-                        console.log(`[onError] Message ${idx}:`, {
-                            role: msg.role,
-                            partsCount: msg.parts?.length,
-                        })
-                        if (msg.parts) {
-                            msg.parts.forEach((part: any, partIdx: number) => {
-                                console.log(
-                                    `[onError]   Part ${partIdx}:`,
-                                    JSON.stringify({
-                                        type: part.type,
-                                        toolName: part.toolName,
-                                        hasInput: !!part.input,
-                                        inputType: typeof part.input,
-                                        inputKeys:
-                                            part.input &&
-                                            typeof part.input === "object"
-                                                ? Object.keys(part.input)
-                                                : null,
-                                    }),
-                                )
-                            })
-                        }
-                    })
-                }
-
-                // Translate technical errors into user-friendly messages
-                // The server now handles detailed error messages, so we can display them directly.
-                // But we still handle connection/network errors that happen before reaching the server.
-                let friendlyMessage = error.message
-
-                // Simple check for network errors if message is generic
-                if (friendlyMessage === "Failed to fetch") {
-                    friendlyMessage =
-                        "Network error. Please check your connection."
-                }
-
-                // Truncated tool input error (model output limit too low)
-                if (friendlyMessage.includes("toolUse.input is invalid")) {
-                    friendlyMessage =
-                        "Output was truncated before the diagram could be generated. Try a simpler request or increase the maxOutputLength."
-                }
-
-                // Translate image not supported error
-                if (
-                    friendlyMessage.includes("image content block") ||
-                    friendlyMessage.toLowerCase().includes("image_url")
-                ) {
-                    friendlyMessage = "This model doesn't support image input."
-                }
-
-                // Add system message for error so it can be cleared
-                setMessages((currentMessages) => {
-                    const errorMessage = {
-                        id: `error-${Date.now()}`,
-                        role: "system" as const,
-                        content: friendlyMessage,
-                        parts: [
-                            { type: "text" as const, text: friendlyMessage },
-                        ],
-                    }
-                    return [...currentMessages, errorMessage]
-                })
-
-                if (error.message.includes("Invalid or missing access code")) {
-                    // Show settings dialog to help user fix it
-                    setShowSettingsDialog(true)
-                }
-            },
-            onFinish: ({ message }) => {
-                // Track actual token usage from server metadata
-                const metadata = message?.metadata as
-                    | Record<string, unknown>
-                    | undefined
-
-                // DEBUG: Log finish reason to diagnose truncation
-                console.log("[onFinish] finishReason:", metadata?.finishReason)
-            },
-            sendAutomaticallyWhen: ({ messages }) => {
-                const isInContinuationMode = partialXmlRef.current.length > 0
-
-                const shouldRetry = hasToolErrors(
-                    messages as unknown as ChatMessage[],
-                )
-
-                if (!shouldRetry) {
-                    // No error, reset retry count and clear state
-                    autoRetryCountRef.current = 0
+                    toast.error(
+                        formatMessage(dict.errors.continuationRetryLimit, {
+                            max: MAX_CONTINUATION_RETRY_COUNT,
+                        }),
+                    )
                     continuationRetryCountRef.current = 0
                     partialXmlRef.current = ""
                     return false
                 }
-
-                // Continuation mode: limited retries for truncation handling
-                if (isInContinuationMode) {
-                    if (
-                        continuationRetryCountRef.current >=
-                        MAX_CONTINUATION_RETRY_COUNT
-                    ) {
-                        toast.error(
-                            formatMessage(dict.errors.continuationRetryLimit, {
-                                max: MAX_CONTINUATION_RETRY_COUNT,
-                            }),
-                        )
-                        continuationRetryCountRef.current = 0
-                        partialXmlRef.current = ""
-                        return false
-                    }
-                    continuationRetryCountRef.current++
-                } else {
-                    // Regular error: check retry count limit
-                    if (autoRetryCountRef.current >= MAX_AUTO_RETRY_COUNT) {
-                        toast.error(
-                            formatMessage(dict.errors.retryLimit, {
-                                max: MAX_AUTO_RETRY_COUNT,
-                            }),
-                        )
-                        autoRetryCountRef.current = 0
-                        partialXmlRef.current = ""
-                        return false
-                    }
-                    // Increment retry count for actual errors
-                    autoRetryCountRef.current++
+                continuationRetryCountRef.current++
+            } else {
+                // Regular error: check retry count limit
+                if (autoRetryCountRef.current >= MAX_AUTO_RETRY_COUNT) {
+                    toast.error(
+                        formatMessage(dict.errors.retryLimit, {
+                            max: MAX_AUTO_RETRY_COUNT,
+                        }),
+                    )
+                    autoRetryCountRef.current = 0
+                    partialXmlRef.current = ""
+                    return false
                 }
+                // Increment retry count for actual errors
+                autoRetryCountRef.current++
+            }
 
-                return true
-            },
-        })
+            return true
+        },
+    })
+
+    // Store sendMessage in ref for use in callbacks (like handleImproveWithSuggestions)
+    useEffect(() => {
+        sendMessageRef.current = sendMessage
+    }, [sendMessage])
 
     // Ref to track latest messages for unload persistence
     const messagesRef = useRef(messages)
@@ -444,61 +512,199 @@ export default function ChatPanel({
         messagesRef.current = messages
     }, [messages])
 
-    const messagesEndRef = useRef<HTMLDivElement>(null)
+    // Track last synced session ID to detect external changes (e.g., URL back/forward)
+    const lastSyncedSessionIdRef = useRef<string | null>(null)
 
-    // Restore messages and XML snapshots from localStorage on mount
-    // useLayoutEffect runs synchronously before browser paint, so messages appear immediately
+    // Helper: Sync UI state with session data (eliminates duplication)
+    // Track message IDs that are being loaded from session (to skip animations/scroll)
+    const loadedMessageIdsRef = useRef<Set<string>>(new Set())
+    // Track when session was just loaded (to skip auto-save on load)
+    const justLoadedSessionRef = useRef(false)
+
+    const syncUIWithSession = useCallback(
+        (
+            data: {
+                messages: unknown[]
+                xmlSnapshots: [number, string][]
+                diagramXml: string
+                diagramHistory?: { svg: string; xml: string }[]
+            } | null,
+        ) => {
+            const hasRealDiagram = isRealDiagram(data?.diagramXml)
+            if (data) {
+                // Mark all message IDs as loaded from session
+                const messageIds = (data.messages as any[]).map(
+                    (m: any) => m.id,
+                )
+                loadedMessageIdsRef.current = new Set(messageIds)
+                setMessages(data.messages as any)
+                xmlSnapshotsRef.current = new Map(data.xmlSnapshots)
+                if (hasRealDiagram) {
+                    onDisplayChart(data.diagramXml, true)
+                    chartXMLRef.current = data.diagramXml
+                } else {
+                    clearDiagram()
+                    // Clear refs to prevent stale data from being saved
+                    chartXMLRef.current = ""
+                    latestSvgRef.current = ""
+                }
+                setDiagramHistory(data.diagramHistory || [])
+            } else {
+                loadedMessageIdsRef.current = new Set()
+                setMessages([])
+                xmlSnapshotsRef.current.clear()
+                clearDiagram()
+                // Clear refs to prevent stale data from being saved
+                chartXMLRef.current = ""
+                latestSvgRef.current = ""
+                setDiagramHistory([])
+            }
+        },
+        [setMessages, onDisplayChart, clearDiagram, setDiagramHistory],
+    )
+
+    // Helper: Build session data object for saving (eliminates duplication)
+    const buildSessionData = useCallback(
+        async (options: { withThumbnail?: boolean } = {}) => {
+            const currentDiagramXml = chartXMLRef.current || ""
+            // Only capture thumbnail if there's a meaningful diagram (not just empty template)
+            const hasRealDiagram = isRealDiagram(currentDiagramXml)
+            let thumbnailDataUrl: string | undefined
+            if (hasRealDiagram && options.withThumbnail) {
+                const freshThumb = await getThumbnailSvg()
+                if (freshThumb) {
+                    latestSvgRef.current = freshThumb
+                    thumbnailDataUrl = freshThumb
+                } else if (latestSvgRef.current) {
+                    // Use cached thumbnail only if we have a real diagram
+                    thumbnailDataUrl = latestSvgRef.current
+                }
+            }
+            return {
+                messages: sanitizeMessages(messagesRef.current),
+                xmlSnapshots: Array.from(xmlSnapshotsRef.current.entries()),
+                diagramXml: currentDiagramXml,
+                thumbnailDataUrl,
+                diagramHistory,
+            }
+        },
+        [diagramHistory, getThumbnailSvg],
+    )
+
+    // Restore messages and XML snapshots from session manager on mount
+    // This effect syncs with the session manager's loaded session
     useLayoutEffect(() => {
         if (hasRestoredRef.current) return
+        if (sessionManager.isLoading) return // Wait for session manager to load
+
         hasRestoredRef.current = true
 
         try {
-            // Restore messages
-            const savedMessages = localStorage.getItem(STORAGE_MESSAGES_KEY)
-            if (savedMessages) {
-                const parsed = JSON.parse(savedMessages)
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                    setMessages(parsed)
-                }
+            const currentSession = sessionManager.currentSession
+            if (currentSession) {
+                // Restore from session manager (IndexedDB)
+                justLoadedSessionRef.current = true
+                syncUIWithSession(currentSession)
             }
-
-            // Restore XML snapshots
-            const savedSnapshots = localStorage.getItem(
-                STORAGE_XML_SNAPSHOTS_KEY,
-            )
-            if (savedSnapshots) {
-                const parsed = JSON.parse(savedSnapshots)
-                xmlSnapshotsRef.current = new Map(parsed)
-            }
+            // Initialize lastSyncedSessionIdRef to prevent sync effect from firing immediately
+            lastSyncedSessionIdRef.current = sessionManager.currentSessionId
+            // Note: Migration from old localStorage format is handled by session-storage.ts
         } catch (error) {
-            console.error("Failed to restore from localStorage:", error)
-            // On complete failure, clear storage to allow recovery
-            localStorage.removeItem(STORAGE_MESSAGES_KEY)
-            localStorage.removeItem(STORAGE_XML_SNAPSHOTS_KEY)
+            console.error("Failed to restore session:", error)
             toast.error(dict.errors.sessionCorrupted)
         } finally {
             setIsRestored(true)
         }
-    }, [setMessages, dict.errors.sessionCorrupted])
+    }, [
+        sessionManager.isLoading,
+        sessionManager.currentSession,
+        syncUIWithSession,
+        dict.errors.sessionCorrupted,
+    ])
 
-    // Save messages to localStorage whenever they change (debounced to prevent blocking during streaming)
+    // Sync UI when session changes externally (e.g., URL navigation via back/forward)
+    // This handles changes AFTER initial restore
+    useEffect(() => {
+        if (!isRestored) return // Wait for initial restore to complete
+        if (!sessionManager.isAvailable) return
+
+        const newSessionId = sessionManager.currentSessionId
+        const newSession = sessionManager.currentSession
+
+        // Skip if session ID hasn't changed (our own saves don't change the ID)
+        if (newSessionId === lastSyncedSessionIdRef.current) return
+
+        // Update last synced ID
+        lastSyncedSessionIdRef.current = newSessionId
+
+        // Sync UI with new session
+        if (newSession) {
+            justLoadedSessionRef.current = true
+            syncUIWithSession(newSession)
+        } else if (!newSession) {
+            syncUIWithSession(null)
+        }
+    }, [
+        isRestored,
+        sessionManager.isAvailable,
+        sessionManager.currentSessionId,
+        sessionManager.currentSession,
+        syncUIWithSession,
+    ])
+
+    // Save messages to session manager (debounced, only when not streaming)
+    // Destructure stable values to avoid effect re-running on every render
+    const {
+        isAvailable: sessionIsAvailable,
+        currentSessionId,
+        saveCurrentSession,
+    } = sessionManager
+
+    // Use ref for saveCurrentSession to avoid infinite loop
+    // (saveCurrentSession changes after each save, which would re-trigger the effect)
+    const saveCurrentSessionRef = useRef(saveCurrentSession)
+    saveCurrentSessionRef.current = saveCurrentSession
+
     useEffect(() => {
         if (!hasRestoredRef.current) return
+        if (!sessionIsAvailable) return
+        // Only save when not actively streaming to avoid write storms
+        if (status === "streaming" || status === "submitted") return
+
+        // Skip auto-save if session was just loaded (to prevent re-ordering)
+        if (justLoadedSessionRef.current) {
+            justLoadedSessionRef.current = false
+            return
+        }
 
         // Clear any pending save
         if (localStorageDebounceRef.current) {
             clearTimeout(localStorageDebounceRef.current)
         }
 
+        // Capture current session ID at schedule time to verify at save time
+        const scheduledForSessionId = currentSessionId
+        // Capture whether there's a REAL diagram NOW (not just empty template)
+        const hasDiagramNow = isRealDiagram(chartXMLRef.current)
+        // Check if this session was just loaded without a diagram
+        const isNodiagramSession =
+            justLoadedSessionIdRef.current === scheduledForSessionId
+
         // Debounce: save after 1 second of no changes
-        localStorageDebounceRef.current = setTimeout(() => {
+        localStorageDebounceRef.current = setTimeout(async () => {
             try {
-                localStorage.setItem(
-                    STORAGE_MESSAGES_KEY,
-                    JSON.stringify(messages),
-                )
+                if (messages.length > 0 || hasDiagramNow) {
+                    const sessionData = await buildSessionData({
+                        // Only capture thumbnail if there was a diagram AND this isn't a no-diagram session
+                        withThumbnail: hasDiagramNow && !isNodiagramSession,
+                    })
+                    await saveCurrentSessionRef.current(
+                        sessionData,
+                        scheduledForSessionId,
+                    )
+                }
             } catch (error) {
-                console.error("Failed to save messages to localStorage:", error)
+                console.error("Failed to save session:", error)
             }
         }, LOCAL_STORAGE_DEBOUNCE_MS)
 
@@ -508,63 +714,64 @@ export default function ChatPanel({
                 clearTimeout(localStorageDebounceRef.current)
             }
         }
-    }, [messages])
+    }, [
+        chartXML,
+        messages,
+        status,
+        sessionIsAvailable,
+        currentSessionId,
+        buildSessionData,
+    ])
 
-    // Save XML snapshots to localStorage whenever they change
-    const saveXmlSnapshots = useCallback(() => {
-        try {
-            const snapshotsArray = Array.from(xmlSnapshotsRef.current.entries())
-            localStorage.setItem(
-                STORAGE_XML_SNAPSHOTS_KEY,
-                JSON.stringify(snapshotsArray),
-            )
-        } catch (error) {
-            console.error(
-                "Failed to save XML snapshots to localStorage:",
-                error,
-            )
+    // Update URL when a new session is created (first message sent)
+    useEffect(() => {
+        if (sessionManager.currentSessionId && !urlSessionId) {
+            // A session was created but URL doesn't have the session param yet
+            router.replace(`?session=${sessionManager.currentSessionId}`, {
+                scroll: false,
+            })
         }
-    }, [])
+    }, [sessionManager.currentSessionId, urlSessionId, router])
 
     // Save session ID to localStorage
     useEffect(() => {
         localStorage.setItem(STORAGE_SESSION_ID_KEY, sessionId)
     }, [sessionId])
 
+    // Save session when page becomes hidden (tab switch, close, navigate away)
+    // This is more reliable than beforeunload for async IndexedDB operations
     useEffect(() => {
-        if (messagesEndRef.current) {
-            messagesEndRef.current.scrollIntoView({ behavior: "smooth" })
-        }
-    }, [messages])
+        if (!sessionManager.isAvailable) return
 
-    // Save state right before page unload (refresh/close)
-    useEffect(() => {
-        const handleBeforeUnload = () => {
-            try {
-                localStorage.setItem(
-                    STORAGE_MESSAGES_KEY,
-                    JSON.stringify(messagesRef.current),
-                )
-                localStorage.setItem(
-                    STORAGE_XML_SNAPSHOTS_KEY,
-                    JSON.stringify(
-                        Array.from(xmlSnapshotsRef.current.entries()),
-                    ),
-                )
-                const xml = chartXMLRef.current
-                if (xml && xml.length > 300) {
-                    localStorage.setItem(STORAGE_DIAGRAM_XML_KEY, xml)
+        const handleVisibilityChange = async () => {
+            if (
+                document.visibilityState === "hidden" &&
+                (messagesRef.current.length > 0 ||
+                    isRealDiagram(chartXMLRef.current))
+            ) {
+                try {
+                    // Attempt to save session - browser may not wait for completion
+                    // Skip thumbnail capture as it may not complete in time
+                    const sessionData = await buildSessionData({
+                        withThumbnail: false,
+                    })
+                    await sessionManager.saveCurrentSession(sessionData)
+                } catch (error) {
+                    console.error(
+                        "Failed to save session on visibility change:",
+                        error,
+                    )
                 }
-                localStorage.setItem(STORAGE_SESSION_ID_KEY, sessionId)
-            } catch (error) {
-                console.error("Failed to persist state before unload:", error)
             }
         }
 
-        window.addEventListener("beforeunload", handleBeforeUnload)
+        document.addEventListener("visibilitychange", handleVisibilityChange)
         return () =>
-            window.removeEventListener("beforeunload", handleBeforeUnload)
-    }, [sessionId])
+            document.removeEventListener(
+                "visibilitychange",
+                handleVisibilityChange,
+            )
+    }, [sessionManager, buildSessionData])
 
     const onFormSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault()
@@ -586,6 +793,8 @@ export default function ChatPanel({
                         input,
                         files,
                         pdfData,
+                        undefined,
+                        urlData,
                     )
 
                     setMessages([
@@ -611,6 +820,7 @@ export default function ChatPanel({
                     setInput("")
                     sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
                     setFiles([])
+                    setUrlData(new Map())
                     return
                 }
             }
@@ -631,6 +841,7 @@ export default function ChatPanel({
                     files,
                     pdfData,
                     parts,
+                    urlData,
                 )
 
                 // Add the combined text as the first part
@@ -648,7 +859,6 @@ export default function ChatPanel({
                 // Save XML snapshot for this message (will be at index = current messages.length)
                 const messageIndex = messages.length
                 xmlSnapshotsRef.current.set(messageIndex, chartXml)
-                saveXmlSnapshots()
 
                 sendChatMessage(parts, chartXml, previousXml, sessionId)
 
@@ -656,36 +866,112 @@ export default function ChatPanel({
                 setInput("")
                 sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
                 setFiles([])
+                setUrlData(new Map())
             } catch (error) {
                 console.error("Error fetching chart data:", error)
             }
         }
     }
 
-    const handleNewChat = useCallback(() => {
+    // Handle session switching from history dropdown
+    const handleSelectSession = useCallback(
+        async (sessionId: string) => {
+            if (!sessionManager.isAvailable) return
+
+            // Save current session before switching
+            if (messages.length > 0) {
+                const sessionData = await buildSessionData({
+                    withThumbnail: true,
+                })
+                await sessionManager.saveCurrentSession(sessionData)
+            }
+
+            // Switch to selected session
+            const sessionData = await sessionManager.switchSession(sessionId)
+            if (sessionData) {
+                const hasRealDiagram = isRealDiagram(sessionData.diagramXml)
+                justLoadedSessionRef.current = true
+
+                // CRITICAL: Update latestSvgRef with the NEW session's thumbnail
+                // This prevents stale thumbnail from previous session being used by auto-save
+                latestSvgRef.current = sessionData.thumbnailDataUrl || ""
+
+                // Track if this session has no real diagram - to prevent thumbnail contamination
+                if (!hasRealDiagram) {
+                    justLoadedSessionIdRef.current = sessionId
+                } else {
+                    justLoadedSessionIdRef.current = null
+                }
+                setValidationStates({}) // Clear validation states when switching sessions
+                syncUIWithSession(sessionData)
+                router.replace(`?session=${sessionId}`, { scroll: false })
+            }
+        },
+        [sessionManager, messages, buildSessionData, syncUIWithSession, router],
+    )
+
+    // Handle session deletion from history dropdown
+    const handleDeleteSession = useCallback(
+        async (sessionId: string) => {
+            if (!sessionManager.isAvailable) return
+            const result = await sessionManager.deleteSession(sessionId)
+
+            if (result.wasCurrentSession) {
+                // Deleted current session - clear UI and URL
+                syncUIWithSession(null)
+                router.replace(pathname, { scroll: false })
+            }
+        },
+        [sessionManager, syncUIWithSession, router, pathname],
+    )
+
+    const handleNewChat = useCallback(async () => {
+        // Save current session before creating new one
+        if (sessionManager.isAvailable && messages.length > 0) {
+            const sessionData = await buildSessionData({ withThumbnail: true })
+            await sessionManager.saveCurrentSession(sessionData)
+            // Refresh sessions list to ensure dropdown shows the saved session
+            await sessionManager.refreshSessions()
+        }
+
+        // Clear session manager state BEFORE clearing URL to prevent race condition
+        // (otherwise the URL update effect would restore the old session URL)
+        sessionManager.clearCurrentSession()
+
+        // Clear UI state (can't use syncUIWithSession here because we also need to clear files)
         setMessages([])
+        setInput("")
         clearDiagram()
+        setDiagramHistory([])
+        setValidationStates({}) // Clear validation states to prevent memory leak
         handleFileChange([]) // Use handleFileChange to also clear pdfData
+        setUrlData(new Map())
         const newSessionId = `session-${Date.now()}-${Math.random()
             .toString(36)
             .slice(2, 9)}`
         setSessionId(newSessionId)
         xmlSnapshotsRef.current.clear()
-        // Clear localStorage with error handling
-        try {
-            localStorage.removeItem(STORAGE_MESSAGES_KEY)
-            localStorage.removeItem(STORAGE_XML_SNAPSHOTS_KEY)
-            localStorage.removeItem(STORAGE_DIAGRAM_XML_KEY)
-            localStorage.setItem(STORAGE_SESSION_ID_KEY, newSessionId)
-            sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
-            toast.success(dict.dialogs.clearSuccess)
-        } catch (error) {
-            console.error("Failed to clear localStorage:", error)
-            toast.warning(dict.errors.storageUpdateFailed)
-        }
+        sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
+        toast.success(dict.dialogs.clearSuccess)
 
-        setShowNewChatDialog(false)
-    }, [clearDiagram, handleFileChange, setMessages, setSessionId])
+        // Clear URL param to show blank state
+        router.replace(pathname, { scroll: false })
+
+        // After starting a fresh chat, move focus back to the chat input
+        setShouldFocusInput(true)
+    }, [
+        clearDiagram,
+        handleFileChange,
+        setMessages,
+        setSessionId,
+        sessionManager,
+        messages,
+        router,
+        dict.dialogs.clearSuccess,
+        buildSessionData,
+        setDiagramHistory,
+        pathname,
+    ])
 
     const handleInputChange = (
         e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
@@ -722,8 +1008,30 @@ export default function ChatPanel({
                 xmlSnapshotsRef.current.delete(key)
             }
         }
-        saveXmlSnapshots()
     }
+
+    // Handle stop button click
+    const handleStop = useCallback(() => {
+        const lastMessage = messages[messages.length - 1]
+        const toolParts = lastMessage?.parts?.filter(
+            (part: any) =>
+                part.type?.startsWith("tool-") &&
+                part.state === "input-streaming",
+        )
+
+        toolParts?.forEach((part: any) => {
+            if (part.toolCallId) {
+                addToolOutput({
+                    tool: part.type.replace("tool-", ""),
+                    toolCallId: part.toolCallId,
+                    state: "output-error",
+                    errorText: "Stopped by user",
+                })
+            }
+        })
+
+        stop()
+    }, [messages, addToolOutput, stop])
 
     // Send chat message with headers
     const sendChatMessage = (
@@ -742,7 +1050,7 @@ export default function ChatPanel({
         sendMessage(
             { parts },
             {
-                body: { xml, previousXml, sessionId },
+                body: { xml, previousXml, sessionId, customSystemMessage },
                 headers: {
                     "x-access-code": config.accessCode,
                     ...(config.aiProvider && {
@@ -768,6 +1076,14 @@ export default function ChatPanel({
                         ...(config.awsSessionToken && {
                             "x-aws-session-token": config.awsSessionToken,
                         }),
+                        // Vertex AI credentials (Express Mode)
+                        ...(config.vertexApiKey && {
+                            "x-vertex-api-key": config.vertexApiKey,
+                        }),
+                    }),
+                    // Send selected model ID for server model lookup (apiKeyEnv/baseUrlEnv)
+                    ...(config.selectedModelId && {
+                        "x-selected-model-id": config.selectedModelId,
                     }),
                     ...(minimalStyle && {
                         "x-minimal-style": "true",
@@ -783,6 +1099,7 @@ export default function ChatPanel({
         files: File[],
         pdfData: Map<File, FileData>,
         imageParts?: any[],
+        urlDataParam?: Map<string, UrlData>,
     ): Promise<string> => {
         let userText = baseText
 
@@ -810,6 +1127,14 @@ export default function ChatPanel({
                     url: dataUrl,
                     mediaType: file.type,
                 })
+            }
+        }
+
+        if (urlDataParam) {
+            for (const [url, data] of urlDataParam) {
+                if (data.content) {
+                    userText += `\n\n[URL: ${url}]\nTitle: ${data.title}\n\n${data.content}`
+                }
             }
         }
 
@@ -958,7 +1283,15 @@ export default function ChatPanel({
                 className={`${isMobile ? "px-3 py-2" : "px-5 py-4"} border-b border-border/50`}
             >
                 <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 overflow-x-hidden">
+                    <button
+                        type="button"
+                        onClick={handleNewChat}
+                        disabled={
+                            status === "streaming" || status === "submitted"
+                        }
+                        className="flex items-center gap-2 overflow-x-hidden hover:opacity-80 transition-opacity cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={dict.nav.newChat}
+                    >
                         <div className="flex items-center gap-2">
                             <Image
                                 src={
@@ -977,14 +1310,18 @@ export default function ChatPanel({
                                 Next AI Drawio
                             </h1>
                         </div>
-                    </div>
+                    </button>
                     <div className="flex items-center gap-1 justify-end overflow-visible">
                         <ButtonWithTooltip
                             tooltipContent={dict.nav.newChat}
                             variant="ghost"
                             size="icon"
-                            onClick={() => setShowNewChatDialog(true)}
-                            className="hover:bg-accent"
+                            onClick={handleNewChat}
+                            disabled={
+                                status === "streaming" || status === "submitted"
+                            }
+                            className="hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                            data-testid="new-chat-button"
                         >
                             <MessageSquarePlus
                                 className={`${isMobile ? "h-4 w-4" : "h-5 w-5"} text-muted-foreground`}
@@ -997,6 +1334,7 @@ export default function ChatPanel({
                             size="icon"
                             onClick={() => setShowSettingsDialog(true)}
                             className="hover:bg-accent"
+                            data-testid="settings-button"
                         >
                             <Settings
                                 className={`${isMobile ? "h-4 w-4" : "h-5 w-5"} text-muted-foreground`}
@@ -1032,6 +1370,12 @@ export default function ChatPanel({
                     status={status}
                     onEditMessage={handleEditMessage}
                     isRestored={isRestored}
+                    sessions={sessionManager.sessions}
+                    onSelectSession={handleSelectSession}
+                    onDeleteSession={handleDeleteSession}
+                    loadedMessageIdsRef={loadedMessageIdsRef}
+                    validationStates={validationStates}
+                    onImproveWithSuggestions={handleImproveWithSuggestions}
                 />
             </main>
 
@@ -1055,42 +1399,44 @@ export default function ChatPanel({
                     status={status}
                     onSubmit={onFormSubmit}
                     onChange={handleInputChange}
-                    onClearChat={handleNewChat}
+                    onStop={handleStop}
                     files={files}
                     onFileChange={handleFileChange}
                     pdfData={pdfData}
+                    urlData={urlData}
+                    onUrlChange={setUrlData}
                     sessionId={sessionId}
                     error={error}
                     models={modelConfig.models}
                     selectedModelId={modelConfig.selectedModelId}
                     onModelSelect={modelConfig.setSelectedModelId}
-                    showUnvalidatedModels={modelConfig.showUnvalidatedModels}
                     onConfigureModels={() => setShowModelConfigDialog(true)}
+                    showUnvalidatedModels={modelConfig.showUnvalidatedModels}
+                    shouldFocus={shouldFocusInput}
+                    onFocused={() => setShouldFocusInput(false)}
                 />
             </footer>
 
             <SettingsDialog
                 open={showSettingsDialog}
                 onOpenChange={setShowSettingsDialog}
-                onCloseProtectionChange={onCloseProtectionChange}
                 drawioUi={drawioUi}
                 onToggleDrawioUi={onToggleDrawioUi}
                 darkMode={darkMode}
                 onToggleDarkMode={onToggleDarkMode}
                 minimalStyle={minimalStyle}
                 onMinimalStyleChange={setMinimalStyle}
+                vlmValidationEnabled={vlmValidationEnabled}
+                onVlmValidationChange={handleVlmValidationChange}
+                customSystemMessage={customSystemMessage}
+                onCustomSystemMessageChange={handleCustomSystemMessageChange}
+                onOpenModelConfig={() => setShowModelConfigDialog(true)}
             />
 
             <ModelConfigDialog
                 open={showModelConfigDialog}
                 onOpenChange={setShowModelConfigDialog}
                 modelConfig={modelConfig}
-            />
-
-            <ResetWarningModal
-                open={showNewChatDialog}
-                onOpenChange={setShowNewChatDialog}
-                onClear={handleNewChat}
             />
         </div>
     )
