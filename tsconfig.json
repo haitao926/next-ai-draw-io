@@ -35,6 +35,8 @@
         "packages",
         "electron",
         "electron-standalone",
-        "dist-electron"
+        "dist-electron",
+        "tests",
+        "playwright.config.ts"
     ]
 }

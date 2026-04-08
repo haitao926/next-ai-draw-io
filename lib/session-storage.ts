@@ -1,4 +1,3 @@
-import { type DBSchema, type IDBPDatabase, openDB } from "idb"
 import { nanoid } from "nanoid"
 
 // Constants
@@ -37,16 +36,8 @@ export interface SessionMetadata {
     thumbnailDataUrl?: string
 }
 
-interface ChatSessionDB extends DBSchema {
-    sessions: {
-        key: string
-        value: ChatSession
-        indexes: { "by-updated": number }
-    }
-}
-
 // Database singleton
-let dbPromise: Promise<IDBPDatabase<ChatSessionDB>> | null = null
+let dbPromise: Promise<IDBDatabase> | null = null
 const resetDBPromise = () => {
     dbPromise = null
 }
@@ -59,8 +50,23 @@ const isClosingError = (error: unknown): boolean => {
     )
 }
 
+const requestToPromise = <T>(request: IDBRequest<T>): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+    })
+}
+
+const txDone = (tx: IDBTransaction): Promise<void> => {
+    return new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve()
+        tx.onabort = () => reject(tx.error)
+        tx.onerror = () => reject(tx.error)
+    })
+}
+
 const withDB = async <T>(
-    action: (db: IDBPDatabase<ChatSessionDB>) => Promise<T>,
+    action: (db: IDBDatabase) => Promise<T>,
 ): Promise<T> => {
     try {
         const db = await getDB()
@@ -75,21 +81,32 @@ const withDB = async <T>(
     }
 }
 
-async function getDB(): Promise<IDBPDatabase<ChatSessionDB>> {
+async function getDB(): Promise<IDBDatabase> {
     if (!dbPromise) {
-        dbPromise = openDB<ChatSessionDB>(DB_NAME, DB_VERSION, {
-            upgrade(db, oldVersion) {
-                if (oldVersion < 1) {
+        dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, DB_VERSION)
+            request.onupgradeneeded = () => {
+                const db = request.result
+                const oldVersion = request.transaction?.db.version ?? 0
+                if (
+                    oldVersion < 1 ||
+                    !db.objectStoreNames.contains(STORE_NAME)
+                ) {
                     const store = db.createObjectStore(STORE_NAME, {
                         keyPath: "id",
                     })
                     store.createIndex("by-updated", "updatedAt")
                 }
-                // Future migrations: if (oldVersion < 2) { ... }
-            },
-            terminated() {
+            }
+            request.onsuccess = () => {
+                resolve(request.result)
+            }
+            request.onerror = () => {
+                reject(request.error)
+            }
+            request.onblocked = () => {
                 resetDBPromise()
-            },
+            }
         })
         dbPromise
             .then((db) => {
@@ -97,7 +114,11 @@ async function getDB(): Promise<IDBPDatabase<ChatSessionDB>> {
                     db.close()
                     resetDBPromise()
                 }
-                db.onclose = () => {
+                if ("onclose" in db) {
+                    db.onclose = () => {
+                        resetDBPromise()
+                    }
+                } else {
                     resetDBPromise()
                 }
             })
@@ -137,14 +158,15 @@ export async function getAllSessionMetadata(): Promise<SessionMetadata[]> {
     try {
         return await withDB(async (db) => {
             const tx = db.transaction(STORE_NAME, "readonly")
-            const index = tx.store.index("by-updated")
-            const metadata: SessionMetadata[] = []
+            const store = tx.objectStore(STORE_NAME)
+            const sessions = (await requestToPromise(
+                store.getAll(),
+            )) as ChatSession[]
+            await txDone(tx)
 
-            // Use cursor to read only metadata fields (avoids loading full messages/XML)
-            let cursor = await index.openCursor(null, "prev") // newest first
-            while (cursor) {
-                const s = cursor.value
-                metadata.push({
+            return sessions
+                .sort((a, b) => b.updatedAt - a.updatedAt)
+                .map((s) => ({
                     id: s.id,
                     title: s.title,
                     createdAt: s.createdAt,
@@ -153,10 +175,7 @@ export async function getAllSessionMetadata(): Promise<SessionMetadata[]> {
                     hasDiagram:
                         !!s.diagramXml && s.diagramXml.trim().length > 0,
                     thumbnailDataUrl: s.thumbnailDataUrl,
-                })
-                cursor = await cursor.continue()
-            }
-            return metadata
+                }))
         })
     } catch (error) {
         console.error("Failed to get session metadata:", error)
@@ -168,7 +187,13 @@ export async function getSession(id: string): Promise<ChatSession | null> {
     if (!isIndexedDBAvailable()) return null
     try {
         return await withDB(async (db) => {
-            return (await db.get(STORE_NAME, id)) || null
+            const tx = db.transaction(STORE_NAME, "readonly")
+            const store = tx.objectStore(STORE_NAME)
+            const session = (await requestToPromise(store.get(id))) as
+                | ChatSession
+                | undefined
+            await txDone(tx)
+            return session || null
         })
     } catch (error) {
         console.error("Failed to get session:", error)
@@ -180,7 +205,10 @@ export async function saveSession(session: ChatSession): Promise<boolean> {
     if (!isIndexedDBAvailable()) return false
     try {
         await withDB(async (db) => {
-            await db.put(STORE_NAME, session)
+            const tx = db.transaction(STORE_NAME, "readwrite")
+            const store = tx.objectStore(STORE_NAME)
+            store.put(session)
+            await txDone(tx)
         })
         return true
     } catch (error) {
@@ -194,7 +222,10 @@ export async function saveSession(session: ChatSession): Promise<boolean> {
             // Retry once
             try {
                 await withDB(async (db) => {
-                    await db.put(STORE_NAME, session)
+                    const tx = db.transaction(STORE_NAME, "readwrite")
+                    const store = tx.objectStore(STORE_NAME)
+                    store.put(session)
+                    await txDone(tx)
                 })
                 return true
             } catch (retryError) {
@@ -215,7 +246,10 @@ export async function deleteSession(id: string): Promise<void> {
     if (!isIndexedDBAvailable()) return
     try {
         await withDB(async (db) => {
-            await db.delete(STORE_NAME, id)
+            const tx = db.transaction(STORE_NAME, "readwrite")
+            const store = tx.objectStore(STORE_NAME)
+            store.delete(id)
+            await txDone(tx)
         })
     } catch (error) {
         console.error("Failed to delete session:", error)
@@ -226,7 +260,11 @@ export async function getSessionCount(): Promise<number> {
     if (!isIndexedDBAvailable()) return 0
     try {
         return await withDB(async (db) => {
-            return await db.count(STORE_NAME)
+            const tx = db.transaction(STORE_NAME, "readonly")
+            const store = tx.objectStore(STORE_NAME)
+            const count = await requestToPromise(store.count())
+            await txDone(tx)
+            return count
         })
     } catch (error) {
         console.error("Failed to get session count:", error)
@@ -239,12 +277,20 @@ export async function deleteOldestSession(): Promise<void> {
     try {
         await withDB(async (db) => {
             const tx = db.transaction(STORE_NAME, "readwrite")
-            const index = tx.store.index("by-updated")
-            const cursor = await index.openCursor()
-            if (cursor) {
-                await cursor.delete()
+            const store = tx.objectStore(STORE_NAME)
+            const sessions = (await requestToPromise(
+                store.getAll(),
+            )) as ChatSession[]
+            if (sessions.length > 0) {
+                const oldest = sessions.reduce(
+                    (oldestSession, currentSession) =>
+                        currentSession.updatedAt < oldestSession.updatedAt
+                            ? currentSession
+                            : oldestSession,
+                )
+                store.delete(oldest.id)
             }
-            await tx.done
+            await txDone(tx)
         })
     } catch (error) {
         console.error("Failed to delete oldest session:", error)

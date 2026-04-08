@@ -74,9 +74,11 @@ interface SettingsDialogProps {
     onOpenModelConfig?: () => void
     customSystemMessage?: string
     onCustomSystemMessageChange?: (value: string) => void
+    onCloseProtectionChange?: (value: boolean) => void
 }
 
 export const STORAGE_ACCESS_CODE_KEY = "next-ai-draw-io-access-code"
+export const STORAGE_CLOSE_PROTECTION_KEY = "next-ai-draw-io-close-protection"
 const STORAGE_ACCESS_CODE_REQUIRED_KEY = "next-ai-draw-io-access-code-required"
 
 function getStoredAccessCodeRequired(): boolean | null {
@@ -100,7 +102,9 @@ function SettingsContent({
     onOpenModelConfig,
     customSystemMessage = "",
     onCustomSystemMessageChange = () => {},
+    onCloseProtectionChange = () => {},
 }: SettingsDialogProps) {
+    void onCloseProtectionChange
     const dict = useDictionary()
     const router = useRouter()
     const pathname = usePathname() || "/"

@@ -120,7 +120,20 @@ export async function generateMetadata({
             },
         },
         icons: {
-            icon: "/favicon.ico",
+            icon: [
+                {
+                    url: "/favicon-white.svg",
+                    type: "image/svg+xml",
+                    media: "(prefers-color-scheme: dark)",
+                },
+                {
+                    url: "/favicon.ico",
+                    media: "(prefers-color-scheme: light)",
+                },
+                {
+                    url: "/favicon.ico",
+                },
+            ],
         },
         alternates: {
             languages: {

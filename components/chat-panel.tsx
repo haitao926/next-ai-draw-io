@@ -46,6 +46,7 @@ import { DevXmlSimulator } from "./dev-xml-simulator"
 
 // localStorage keys for persistence
 const STORAGE_SESSION_ID_KEY = "next-ai-draw-io-session-id"
+export const STORAGE_DIAGRAM_XML_KEY = "next-ai-draw-io-diagram-xml"
 
 // sessionStorage keys
 const SESSION_STORAGE_INPUT_KEY = "next-ai-draw-io-input"
@@ -73,6 +74,7 @@ interface ChatPanelProps {
     darkMode: boolean
     onToggleDarkMode: () => void
     isMobile?: boolean
+    onCloseProtectionChange?: (value: boolean) => void
 }
 
 // Constants for tool states
@@ -114,6 +116,7 @@ export default function ChatPanel({
     darkMode,
     onToggleDarkMode,
     isMobile = false,
+    onCloseProtectionChange = () => {},
 }: ChatPanelProps) {
     const {
         loadDiagram: onDisplayChart,
@@ -1431,6 +1434,7 @@ export default function ChatPanel({
                 customSystemMessage={customSystemMessage}
                 onCustomSystemMessageChange={handleCustomSystemMessageChange}
                 onOpenModelConfig={() => setShowModelConfigDialog(true)}
+                onCloseProtectionChange={onCloseProtectionChange}
             />
 
             <ModelConfigDialog

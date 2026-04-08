@@ -190,6 +190,9 @@ export const PROVIDER_INFO: Record<
 // Suggested models per provider for quick add
 export const SUGGESTED_MODELS: Partial<Record<ProviderName, string[]>> = {
     openai: [
+        // OpenAI-compatible endpoints may expose third-party model IDs too
+        "deepseek-chat",
+        "gemini-3-pro-preview",
         "gpt-5.2-pro",
         "gpt-5.2-chat-latest",
         "gpt-5.2",
@@ -227,6 +230,8 @@ export const SUGGESTED_MODELS: Partial<Record<ProviderName, string[]>> = {
         "claude-3-haiku-20240307",
     ],
     google: [
+        // Gemini 3 preview
+        "gemini-3-pro-preview",
         // Gemini 2.5 series
         "gemini-2.5-pro",
         "gemini-2.5-flash",

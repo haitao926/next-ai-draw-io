@@ -1,11 +1,30 @@
-import { extract } from "@extractus/article-extractor"
 import { NextResponse } from "next/server"
-import TurndownService from "turndown"
 import { allowPrivateUrls, isPrivateUrl } from "@/lib/ssrf-protection"
 
-const MAX_CONTENT_LENGTH = 150000 // Match PDF limit
+const MAX_CONTENT_LENGTH = 150000
 const EXTRACT_TIMEOUT_MS = 15000
 const USER_AGENT = "Mozilla/5.0 (compatible; NextAIDrawio/1.0)"
+
+function htmlToText(html: string): string {
+    return html
+        .replace(/<script[\s\S]*?<\/script>/gi, "")
+        .replace(/<style[\s\S]*?<\/style>/gi, "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\s+/g, " ")
+        .trim()
+}
+
+function extractTitleFromHtml(html: string): string {
+    const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+    if (!match?.[1]) return "Untitled"
+    return htmlToText(match[1]) || "Untitled"
+}
 
 export async function POST(req: Request) {
     try {
@@ -18,7 +37,6 @@ export async function POST(req: Request) {
             )
         }
 
-        // Validate URL format
         try {
             new URL(url)
         } catch {
@@ -28,23 +46,34 @@ export async function POST(req: Request) {
             )
         }
 
-        // SSRF protection
         if (!allowPrivateUrls && isPrivateUrl(url)) {
             return NextResponse.json(
                 { error: "Cannot access private/internal URLs" },
                 { status: 400 },
             )
         }
-        const headController = new AbortController()
-        const headTimeout = setTimeout(() => headController.abort(), 3000)
+
+        const controller = new AbortController()
+        const timeoutId = setTimeout(
+            () => controller.abort(),
+            EXTRACT_TIMEOUT_MS,
+        )
+
         try {
-            const headResponse = await fetch(url, {
-                method: "HEAD",
+            const response = await fetch(url, {
                 headers: { "User-Agent": USER_AGENT },
-                signal: headController.signal,
+                signal: controller.signal,
             })
-            const contentType = headResponse.headers.get("content-type")
-            if (contentType?.includes("application/pdf")) {
+
+            if (!response.ok) {
+                return NextResponse.json(
+                    { error: `Failed to fetch URL (HTTP ${response.status})` },
+                    { status: 400 },
+                )
+            }
+
+            const contentType = response.headers.get("content-type") || ""
+            if (contentType.includes("application/pdf")) {
                 return NextResponse.json(
                     {
                         error: "PDF URLs are not supported. Please download and upload the PDF file directly",
@@ -52,73 +81,41 @@ export async function POST(req: Request) {
                     { status: 422 },
                 )
             }
-        } catch (err) {
-            console.warn(
-                "HEAD pre-check failed, proceeding with extraction:",
-                err,
-            )
-        } finally {
-            clearTimeout(headTimeout)
-        }
 
-        // Extract article content with timeout to avoid tying up server resources
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => {
-            controller.abort()
-        }, EXTRACT_TIMEOUT_MS)
+            const html = await response.text()
+            const content = htmlToText(html)
 
-        let article
-        try {
-            article = await extract(url, undefined, {
-                headers: { "User-Agent": USER_AGENT },
-                signal: controller.signal,
-            })
-        } catch (err: any) {
-            if (err?.name === "AbortError") {
+            if (!content) {
                 return NextResponse.json(
-                    { error: "Timed out while fetching URL content" },
-                    { status: 504 },
+                    { error: "Could not extract content from URL" },
+                    { status: 400 },
                 )
             }
-            throw err
+
+            if (content.length > MAX_CONTENT_LENGTH) {
+                return NextResponse.json(
+                    {
+                        error: `Content exceeds ${MAX_CONTENT_LENGTH / 1000}k character limit (${(content.length / 1000).toFixed(1)}k chars)`,
+                    },
+                    { status: 400 },
+                )
+            }
+
+            return NextResponse.json({
+                title: extractTitleFromHtml(html),
+                content,
+                charCount: content.length,
+            })
         } finally {
             clearTimeout(timeoutId)
         }
-
-        if (!article || !article.content) {
-            return NextResponse.json(
-                { error: "Could not extract content from URL" },
-                { status: 400 },
-            )
-        }
-
-        // Convert HTML to Markdown
-        const turndownService = new TurndownService({
-            headingStyle: "atx",
-            codeBlockStyle: "fenced",
-        })
-
-        // Remove unwanted elements before conversion
-        turndownService.remove(["script", "style", "iframe", "noscript"])
-
-        const markdown = turndownService.turndown(article.content)
-
-        // Check content length
-        if (markdown.length > MAX_CONTENT_LENGTH) {
-            return NextResponse.json(
-                {
-                    error: `Content exceeds ${MAX_CONTENT_LENGTH / 1000}k character limit (${(markdown.length / 1000).toFixed(1)}k chars)`,
-                },
-                { status: 400 },
-            )
-        }
-
-        return NextResponse.json({
-            title: article.title || "Untitled",
-            content: markdown,
-            charCount: markdown.length,
-        })
     } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+            return NextResponse.json(
+                { error: "Timed out while fetching URL content" },
+                { status: 504 },
+            )
+        }
         console.error("URL extraction error:", error)
         return NextResponse.json(
             { error: "Failed to fetch or parse URL content" },

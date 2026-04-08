@@ -12,6 +12,7 @@ import fs from "fs/promises"
 import { jsonrepair } from "jsonrepair"
 import path from "path"
 import { z } from "zod"
+import { isValidAccessCode, normalizeAccessCode } from "@/lib/access-code"
 import {
     getAIModel,
     SINGLE_SYSTEM_PROVIDERS,
@@ -74,20 +75,16 @@ function createCachedStreamResponse(xml: string): Response {
 // Inner handler function
 async function handleChatRequest(req: Request): Promise<Response> {
     // Check for access code
-    const accessCodes =
-        process.env.ACCESS_CODE_LIST?.split(",")
-            .map((code) => code.trim())
-            .filter(Boolean) || []
-    if (accessCodes.length > 0) {
-        const accessCodeHeader = req.headers.get("x-access-code")
-        if (!accessCodeHeader || !accessCodes.includes(accessCodeHeader)) {
-            return Response.json(
-                {
-                    error: "Invalid or missing access code. Please configure it in Settings.",
-                },
-                { status: 401 },
-            )
-        }
+    const accessCodeHeader = normalizeAccessCode(
+        req.headers.get("x-access-code"),
+    )
+    if (!isValidAccessCode(accessCodeHeader)) {
+        return Response.json(
+            {
+                error: "Invalid or missing access code. Please configure it in Settings.",
+            },
+            { status: 401 },
+        )
     }
 
     const body = await req.json()
@@ -217,6 +214,7 @@ async function handleChatRequest(req: Request): Promise<Response> {
         baseUrl,
         apiKey: req.headers.get("x-ai-api-key"),
         modelId: req.headers.get("x-ai-model"),
+        account: req.headers.get("x-ai-account"),
         // AWS Bedrock credentials
         awsAccessKeyId: req.headers.get("x-aws-access-key-id"),
         awsSecretAccessKey: req.headers.get("x-aws-secret-access-key"),

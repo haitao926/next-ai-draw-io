@@ -3,17 +3,74 @@ import { createAnthropic } from "@ai-sdk/anthropic"
 import { createDeepSeek, deepseek } from "@ai-sdk/deepseek"
 import { createGateway } from "@ai-sdk/gateway"
 import { createGoogleGenerativeAI } from "@ai-sdk/google"
-import { createVertex } from "@ai-sdk/google-vertex"
 import { createOpenAI } from "@ai-sdk/openai"
 import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 import { generateText } from "ai"
 import { NextResponse } from "next/server"
 import { createOllama } from "ollama-ai-provider-v2"
-import { normalizeMiniMaxBaseURL } from "@/lib/ai-providers"
-import { allowPrivateUrls, isPrivateUrl } from "@/lib/ssrf-protection"
-import { PROVIDER_INFO, type ProviderName } from "@/lib/types/model-config"
+import { normalizeOpenAICompatibleBaseUrl } from "@/lib/openai-compatible"
 
 export const runtime = "nodejs"
+
+/**
+ * SECURITY: Check if URL points to private/internal network (SSRF protection)
+ * Blocks: localhost, private IPs, link-local, AWS metadata service
+ */
+function isPrivateUrl(urlString: string): boolean {
+    try {
+        const url = new URL(urlString)
+        const hostname = url.hostname.toLowerCase()
+
+        // Block localhost
+        if (
+            hostname === "localhost" ||
+            hostname === "127.0.0.1" ||
+            hostname === "::1"
+        ) {
+            return true
+        }
+
+        // Block AWS/cloud metadata endpoints
+        if (
+            hostname === "169.254.169.254" ||
+            hostname === "metadata.google.internal"
+        ) {
+            return true
+        }
+
+        // Check for private IPv4 ranges
+        const ipv4Match = hostname.match(
+            /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/,
+        )
+        if (ipv4Match) {
+            const [, a, b] = ipv4Match.map(Number)
+            // 10.0.0.0/8
+            if (a === 10) return true
+            // 172.16.0.0/12
+            if (a === 172 && b >= 16 && b <= 31) return true
+            // 192.168.0.0/16
+            if (a === 192 && b === 168) return true
+            // 169.254.0.0/16 (link-local)
+            if (a === 169 && b === 254) return true
+            // 127.0.0.0/8 (loopback)
+            if (a === 127) return true
+        }
+
+        // Block common internal hostnames
+        if (
+            hostname.endsWith(".local") ||
+            hostname.endsWith(".internal") ||
+            hostname.endsWith(".localhost")
+        ) {
+            return true
+        }
+
+        return false
+    } catch {
+        // Invalid URL - block it
+        return true
+    }
+}
 
 interface ValidateRequest {
     provider: string
@@ -24,8 +81,6 @@ interface ValidateRequest {
     awsAccessKeyId?: string
     awsSecretAccessKey?: string
     awsRegion?: string
-    // Vertex AI specific
-    vertexApiKey?: string // Express Mode API key
 }
 
 export async function POST(req: Request) {
@@ -39,8 +94,6 @@ export async function POST(req: Request) {
             awsAccessKeyId,
             awsSecretAccessKey,
             awsRegion,
-            // Note: Express Mode only needs vertexApiKey
-            vertexApiKey,
         } = body
 
         if (!provider || !modelId) {
@@ -51,7 +104,7 @@ export async function POST(req: Request) {
         }
 
         // SECURITY: Block SSRF attacks via custom baseUrl
-        if (baseUrl && !allowPrivateUrls && isPrivateUrl(baseUrl)) {
+        if (baseUrl && isPrivateUrl(baseUrl)) {
             return NextResponse.json(
                 { valid: false, error: "Invalid base URL" },
                 { status: 400 },
@@ -69,16 +122,6 @@ export async function POST(req: Request) {
                     { status: 400 },
                 )
             }
-        } else if (provider === "vertexai") {
-            if (!vertexApiKey) {
-                return NextResponse.json(
-                    {
-                        valid: false,
-                        error: "Vertex AI API key is required for Express Mode",
-                    },
-                    { status: 400 },
-                )
-            }
         } else if (provider !== "ollama" && provider !== "edgeone" && !apiKey) {
             return NextResponse.json(
                 { valid: false, error: "API key is required" },
@@ -92,7 +135,9 @@ export async function POST(req: Request) {
             case "openai": {
                 const openai = createOpenAI({
                     apiKey,
-                    ...(baseUrl && { baseURL: baseUrl }),
+                    ...(baseUrl && {
+                        baseURL: normalizeOpenAICompatibleBaseUrl(baseUrl),
+                    }),
                 })
                 model = openai.chat(modelId)
                 break
@@ -113,15 +158,6 @@ export async function POST(req: Request) {
                     ...(baseUrl && { baseURL: baseUrl }),
                 })
                 model = google(modelId)
-                break
-            }
-
-            case "vertexai": {
-                const vertex = createVertex({
-                    apiKey: vertexApiKey,
-                    ...(baseUrl && { baseURL: baseUrl }),
-                })
-                model = vertex(modelId)
                 break
             }
 
@@ -169,28 +205,17 @@ export async function POST(req: Request) {
             case "siliconflow": {
                 const sf = createOpenAI({
                     apiKey,
-                    baseURL: baseUrl || "https://api.siliconflow.cn/v1",
+                    baseURL: baseUrl || "https://api.siliconflow.com/v1",
                 })
                 model = sf.chat(modelId)
                 break
             }
 
             case "ollama": {
-                // SECURITY: Mirror ai-providers.ts guard — only use server
-                // OLLAMA_API_KEY when the URL is also from server config.
-                const ollamaApiKey = baseUrl
-                    ? apiKey || undefined
-                    : apiKey || process.env.OLLAMA_API_KEY || undefined
-                const ollamaProvider = createOllama({
-                    baseURL:
-                        baseUrl ||
-                        process.env.OLLAMA_BASE_URL ||
-                        "https://ollama.com/api",
-                    ...(ollamaApiKey && {
-                        headers: { Authorization: `Bearer ${ollamaApiKey}` },
-                    }),
+                const ollama = createOllama({
+                    baseURL: baseUrl || "http://localhost:11434",
                 })
-                model = ollamaProvider(modelId)
+                model = ollama(modelId)
                 break
             }
 
@@ -229,148 +254,13 @@ export async function POST(req: Request) {
             }
 
             case "doubao": {
-                // ByteDance Doubao: use DeepSeek for DeepSeek/Kimi models, OpenAI for others
-                const doubaoBaseUrl =
-                    baseUrl || "https://ark.cn-beijing.volces.com/api/v3"
-                const lowerModelId = modelId.toLowerCase()
-                if (
-                    lowerModelId.includes("deepseek") ||
-                    lowerModelId.includes("kimi")
-                ) {
-                    const doubao = createDeepSeek({
-                        apiKey,
-                        baseURL: doubaoBaseUrl,
-                    })
-                    model = doubao(modelId)
-                } else {
-                    const doubao = createOpenAI({
-                        apiKey,
-                        baseURL: doubaoBaseUrl,
-                    })
-                    model = doubao.chat(modelId)
-                }
-                break
-            }
-
-            case "modelscope": {
-                const baseURL =
-                    baseUrl || "https://api-inference.modelscope.cn/v1"
-                const startTime = Date.now()
-
-                try {
-                    // Initiate a streaming request (required for QwQ-32B and certain Qwen3 models)
-                    const response = await fetch(
-                        `${baseURL}/chat/completions`,
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json",
-                                Authorization: `Bearer ${apiKey}`,
-                            },
-                            body: JSON.stringify({
-                                model: modelId,
-                                messages: [
-                                    { role: "user", content: "Say 'OK'" },
-                                ],
-                                max_tokens: 20,
-                                stream: true,
-                                enable_thinking: false,
-                            }),
-                        },
-                    )
-
-                    if (!response.ok) {
-                        const errorText = await response.text()
-                        throw new Error(
-                            `ModelScope API error (${response.status}): ${errorText}`,
-                        )
-                    }
-
-                    const contentType =
-                        response.headers.get("content-type") || ""
-                    const isValidStreamingResponse =
-                        response.status === 200 &&
-                        (contentType.includes("text/event-stream") ||
-                            contentType.includes("application/json"))
-
-                    if (!isValidStreamingResponse) {
-                        throw new Error(
-                            `Unexpected response format: ${contentType}`,
-                        )
-                    }
-
-                    const responseTime = Date.now() - startTime
-
-                    if (response.body) {
-                        response.body.cancel().catch(() => {
-                            /* Ignore cancellation errors */
-                        })
-                    }
-
-                    return NextResponse.json({
-                        valid: true,
-                        responseTime,
-                        note: "ModelScope model validated (using streaming API)",
-                    })
-                } catch (error) {
-                    console.error(
-                        "[validate-model] ModelScope validation failed:",
-                        error,
-                    )
-                    throw error
-                }
-            }
-
-            case "minimax": {
-                const rawUrl =
-                    baseUrl ||
-                    PROVIDER_INFO.minimax?.defaultBaseUrl ||
-                    "https://api.minimaxi.com/anthropic"
-                const { baseURL: minimaxBaseUrl, isAnthropicCompatible } =
-                    normalizeMiniMaxBaseURL(rawUrl)
-
-                if (isAnthropicCompatible) {
-                    const minimax = createAnthropic({
-                        apiKey,
-                        baseURL: minimaxBaseUrl,
-                    })
-                    model = minimax.chat(modelId)
-                } else {
-                    const minimax = createOpenAI({
-                        apiKey,
-                        baseURL: minimaxBaseUrl,
-                    })
-                    model = minimax.chat(modelId)
-                }
-                break
-            }
-
-            // GLM, Qwen, Kimi, Qiniu, Novita - OpenAI compatible
-            case "glm":
-            case "qwen":
-            case "kimi":
-            case "qiniu":
-            case "novita": {
-                const baseURL =
-                    baseUrl ||
-                    PROVIDER_INFO[provider as ProviderName]?.defaultBaseUrl ||
-                    ""
-
-                if (!baseURL) {
-                    return NextResponse.json(
-                        {
-                            valid: false,
-                            error: `No base URL configured for provider: ${provider}`,
-                        },
-                        { status: 400 },
-                    )
-                }
-
-                const openai = createOpenAI({
+                // ByteDance Doubao uses DeepSeek-compatible API
+                const doubao = createDeepSeek({
                     apiKey,
-                    baseURL,
+                    baseURL:
+                        baseUrl || "https://ark.cn-beijing.volces.com/api/v3",
                 })
-                model = openai.chat(modelId)
+                model = doubao(modelId)
                 break
             }
 
