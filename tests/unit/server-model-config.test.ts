@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import {
+    getServerModelFailoverCandidates,
     loadFlattenedServerModels,
     type ServerModelsConfig,
     ServerModelsConfigSchema,
@@ -167,5 +168,34 @@ describe("loadFlattenedServerModels", () => {
 
         expect(models.length).toBe(1)
         expect(models[0].apiKeyEnv).toEqual(["OPENAI_KEY_1", "OPENAI_KEY_2"])
+    })
+
+    it("orders failover candidates starting from the selected model", async () => {
+        const config: ServerModelsConfig = {
+            providers: [
+                {
+                    name: "VectorEngine",
+                    provider: "google",
+                    models: ["gemini-primary", "gemini-backup"],
+                },
+                {
+                    name: "PackyCode",
+                    provider: "openai",
+                    models: ["kimi-k2.5"],
+                },
+            ],
+        }
+        process.env.AI_MODELS_CONFIG = JSON.stringify(config)
+        process.env.AI_MODELS_CONFIG_PATH = ""
+
+        const candidates = await getServerModelFailoverCandidates(
+            "server:vectorengine:gemini-backup",
+        )
+
+        expect(candidates.map((model) => model.id)).toEqual([
+            "server:vectorengine:gemini-backup",
+            "server:packycode:kimi-k2.5",
+            "server:vectorengine:gemini-primary",
+        ])
     })
 })

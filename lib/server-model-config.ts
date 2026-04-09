@@ -153,3 +153,24 @@ export async function findServerModelById(
     const models = await loadFlattenedServerModels()
     return models.find((m) => m.id === modelId) || null
 }
+
+/**
+ * Return ordered failover candidates for a server model.
+ * The selected model is first, followed by the remaining configured models
+ * in config order, wrapping around to the beginning.
+ */
+export async function getServerModelFailoverCandidates(
+    modelId: string,
+): Promise<FlattenedServerModel[]> {
+    if (!modelId.startsWith("server:")) return []
+
+    const models = await loadFlattenedServerModels()
+    if (models.length === 0) return []
+
+    const selectedIndex = models.findIndex((model) => model.id === modelId)
+    if (selectedIndex === -1) {
+        return models
+    }
+
+    return [...models.slice(selectedIndex), ...models.slice(0, selectedIndex)]
+}

@@ -169,6 +169,13 @@ export default function ChatPanel({
 
     // Model configuration hook
     const modelConfig = useModelConfig()
+    const selectedModelIdRef = useRef<string | undefined>(
+        modelConfig.selectedModelId,
+    )
+
+    useEffect(() => {
+        selectedModelIdRef.current = modelConfig.selectedModelId
+    }, [modelConfig.selectedModelId])
 
     // Session manager for chat history (pass URL session ID for restoration)
     const sessionManager = useSessionManager({ initialSessionId: urlSessionId })
@@ -365,6 +372,33 @@ export default function ChatPanel({
     } = useChat({
         transport: new DefaultChatTransport({
             api: getApiEndpoint("/api/chat"),
+            fetch: async (input, init) => {
+                const response = await fetch(input, init)
+                const actualSelectedModelId =
+                    response.headers.get("x-ai-actual-selected-model-id") ||
+                    undefined
+                const actualModelId =
+                    response.headers.get("x-ai-actual-model-id") ||
+                    actualSelectedModelId
+                const fallbackApplied =
+                    response.headers.get("x-ai-fallback-applied") === "true"
+
+                if (
+                    actualSelectedModelId &&
+                    actualSelectedModelId !== selectedModelIdRef.current
+                ) {
+                    selectedModelIdRef.current = actualSelectedModelId
+                    modelConfig.setSelectedModelId(actualSelectedModelId)
+
+                    if (fallbackApplied) {
+                        toast.info(
+                            `当前模型不可用，已自动切换到 ${actualModelId || "备用模型"}`,
+                        )
+                    }
+                }
+
+                return response
+            },
         }),
         onToolCall: async ({ toolCall }) => {
             await handleToolCall({ toolCall }, addToolOutput)

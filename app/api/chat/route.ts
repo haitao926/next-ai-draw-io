@@ -45,7 +45,14 @@ import {
     setTraceOutput,
     wrapWithObserve,
 } from "@/lib/langfuse"
-import { findServerModelById } from "@/lib/server-model-config"
+import {
+    buildModelFailoverHeaders,
+    shouldFailoverToNextModel,
+} from "@/lib/model-failover"
+import {
+    type FlattenedServerModel,
+    getServerModelFailoverCandidates,
+} from "@/lib/server-model-config"
 import { getSystemPrompt } from "@/lib/system-prompts"
 import { getUserIdFromRequest } from "@/lib/user-id"
 
@@ -532,43 +539,21 @@ async function handleChatRequest(req: Request): Promise<Response> {
     // Get cookie header for EdgeOne authentication (eo_token, eo_time)
     const cookieHeader = req.headers.get("cookie")
 
-    // Check if this is a server model with custom env var names
-    let serverModelConfig: {
-        apiKeyEnv?: string | string[]
-        baseUrlEnv?: string
-        provider?: string
-        modelId?: string
-    } = {}
-    if (selectedModelId?.startsWith("server:")) {
-        const serverModel = await findServerModelById(selectedModelId)
-        console.log(
-            `[Server Model Lookup] ID: ${selectedModelId}, Found: ${!!serverModel}, Provider: ${serverModel?.provider}`,
-        )
-        if (serverModel) {
-            serverModelConfig = {
-                apiKeyEnv: serverModel.apiKeyEnv,
-                baseUrlEnv: serverModel.baseUrlEnv,
-                // Use actual provider from config (client header may have incorrect value due to ID format change)
-                provider: serverModel.provider,
-                modelId: serverModel.modelId,
-            }
-        }
-    }
+    const serverModelCandidates = selectedModelId?.startsWith("server:")
+        ? await getServerModelFailoverCandidates(selectedModelId)
+        : []
 
-    const clientOverrides = {
-        // Server model provider takes precedence over client header
-        provider: serverModelConfig.provider || provider,
+    const baseClientOverrides = {
+        provider,
         baseUrl,
         apiKey: req.headers.get("x-ai-api-key"),
-        modelId: serverModelConfig.modelId || req.headers.get("x-ai-model"),
+        modelId: req.headers.get("x-ai-model"),
         account: req.headers.get("x-ai-account"),
         // AWS Bedrock credentials
         awsAccessKeyId: req.headers.get("x-aws-access-key-id"),
         awsSecretAccessKey: req.headers.get("x-aws-secret-access-key"),
         awsRegion: req.headers.get("x-aws-region"),
         awsSessionToken: req.headers.get("x-aws-session-token"),
-        // Server model custom env var names
-        ...serverModelConfig,
         // Vertex AI credentials (Express Mode)
         vertexApiKey: req.headers.get("x-vertex-api-key"),
         // Pass cookies for EdgeOne Pages authentication
@@ -581,389 +566,439 @@ async function handleChatRequest(req: Request): Promise<Response> {
     // Read minimal style preference from header
     const minimalStyle = req.headers.get("x-minimal-style") === "true"
 
-    console.log(
-        `[Client Overrides] provider: ${clientOverrides.provider}, modelId: ${clientOverrides.modelId}`,
-    )
-
-    // Get AI model with optional client overrides
-    const {
-        model,
-        providerOptions,
-        headers,
-        modelId,
-        provider: resolvedProvider,
-    } = getAIModel(clientOverrides)
-
-    // Check if model supports prompt caching
-    const shouldCache = supportsPromptCaching(modelId)
-    console.log(
-        `[Prompt Caching] ${shouldCache ? "ENABLED" : "DISABLED"} for model: ${modelId}`,
-    )
-
-    // Get the appropriate system prompt based on model (extended for Opus/Haiku 4.5)
-    const systemMessage = getSystemPrompt(modelId, minimalStyle)
-    const finalSystemMessage = customSystemMessage
-        ? `${systemMessage}\n\n## Custom Instructions\n${customSystemMessage}`
-        : systemMessage
-
-    // Extract file parts (images) from the last user message
     const fileParts =
         lastUserMessage?.parts?.filter((part: any) => part.type === "file") ||
         []
-
-    // Check if user is sending images to a model that doesn't support them
-    // AI SDK silently drops unsupported parts, so we need to catch this early
-    if (fileParts.length > 0 && !supportsImageInput(modelId)) {
-        return Response.json(
-            {
-                error: `The model "${modelId}" does not support image input. Please use a vision-capable model (e.g., GPT-4o, Claude, Gemini) or remove the image.`,
-            },
-            { status: 400 },
-        )
-    }
-
-    const geminiAssetFallbackResponse = await maybeHandleGeminiAssetRequest({
-        modelId,
-        userInputText,
-        xml,
-    })
-    if (geminiAssetFallbackResponse) {
-        return geminiAssetFallbackResponse
-    }
-
-    // User input only - XML is now in a separate cached system message
     const formattedUserInput = `User input:
 """md
 ${userInputText}
 """`
-
-    // Convert UIMessages to ModelMessages and add system message
-    const modelMessages = await convertToModelMessages(messages)
-
-    // DEBUG: Log incoming messages structure
-    console.log("[route.ts] Incoming messages count:", messages.length)
-    messages.forEach((msg: any, idx: number) => {
-        console.log(
-            `[route.ts] Message ${idx} role:`,
-            msg.role,
-            "parts count:",
-            msg.parts?.length,
-        )
-        if (msg.parts) {
-            msg.parts.forEach((part: any, partIdx: number) => {
-                if (
-                    part.type === "tool-invocation" ||
-                    part.type === "tool-result"
-                ) {
-                    console.log(`[route.ts]   Part ${partIdx}:`, {
-                        type: part.type,
-                        toolName: part.toolName,
-                        hasInput: !!part.input,
-                        inputType: typeof part.input,
-                        inputKeys:
-                            part.input && typeof part.input === "object"
-                                ? Object.keys(part.input)
-                                : null,
-                    })
-                }
-            })
-        }
+    const telemetryConfig = getTelemetryConfig({
+        sessionId: validSessionId,
+        userId,
     })
-
-    // Replace historical tool call XML with placeholders to reduce tokens.
-    // Some providers (notably Gemini/Google) attach provider-specific signatures
-    // to tool-call history, so we must not rewrite or filter those messages.
-    const canRewriteHistory = canRewriteHistoricalToolMessages(
-        resolvedProvider,
-        modelId,
-    )
-
-    // Disabled by default - some models (e.g. minimax) copy placeholders instead of generating XML
-    const enableHistoryReplace =
-        process.env.ENABLE_HISTORY_XML_REPLACE === "true"
-    const placeholderMessages =
-        enableHistoryReplace && canRewriteHistory
-            ? replaceHistoricalToolInputs(modelMessages)
-            : modelMessages
-    const redactedMessages = canRewriteHistory
-        ? redactHistoricalToolResults(placeholderMessages)
-        : placeholderMessages
-
-    // Filter out messages with empty content arrays (Bedrock API rejects these)
-    // This is a safety measure - ideally convertToModelMessages should handle all cases
-    let enhancedMessages = redactedMessages.filter(
-        (msg: any) =>
-            msg.content && Array.isArray(msg.content) && msg.content.length > 0,
-    )
-
-    // Filter out tool-calls with invalid inputs (from failed repair or interrupted streaming).
-    // Keep Google/Gemini histories intact so provider metadata such as thought signatures survives.
-    if (canRewriteHistory) {
-        enhancedMessages = enhancedMessages
-            .map((msg: any) => {
-                if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
-                    return msg
+    const uiMessageStreamOptions = {
+        sendReasoning: true,
+        messageMetadata: ({ part }: { part: any }) => {
+            if (part.type === "finish") {
+                const usage = (part as any).totalUsage
+                return {
+                    totalTokens: usage?.totalTokens ?? 0,
+                    finishReason: (part as any).finishReason,
                 }
-                const filteredContent = msg.content.filter((part: any) => {
-                    if (part.type === "tool-call") {
-                        // Check if input is a valid object (not null, undefined, or empty)
-                        if (
-                            !part.input ||
-                            typeof part.input !== "object" ||
-                            Object.keys(part.input).length === 0
-                        ) {
-                            console.warn(
-                                `[route.ts] Filtering out tool-call with invalid input:`,
-                                { toolName: part.toolName, input: part.input },
-                            )
-                            return false
-                        }
-                    }
-                    return true
-                })
-                return { ...msg, content: filteredContent }
-            })
-            .filter((msg: any) => msg.content && msg.content.length > 0)
-    }
-
-    // DEBUG: Log modelMessages structure (what's being sent to AI)
-    console.log("[route.ts] Model messages count:", enhancedMessages.length)
-    enhancedMessages.forEach((msg: any, idx: number) => {
-        console.log(
-            `[route.ts] ModelMsg ${idx} role:`,
-            msg.role,
-            "content count:",
-            msg.content?.length,
-        )
-        if (msg.content) {
-            msg.content.forEach((part: any, partIdx: number) => {
-                if (part.type === "tool-call" || part.type === "tool-result") {
-                    console.log(`[route.ts]   Content ${partIdx}:`, {
-                        type: part.type,
-                        toolName: part.toolName,
-                        hasInput: !!part.input,
-                        inputType: typeof part.input,
-                        inputValue:
-                            part.input === undefined
-                                ? "undefined"
-                                : part.input === null
-                                  ? "null"
-                                  : "object",
-                    })
-                }
-            })
-        }
-    })
-
-    // Update the last message with user input only (XML moved to separate cached system message)
-    if (enhancedMessages.length >= 1) {
-        const lastModelMessage = enhancedMessages[enhancedMessages.length - 1]
-        if (lastModelMessage.role === "user") {
-            // Build content array with user input text and file parts
-            const contentParts: any[] = [
-                { type: "text", text: formattedUserInput },
-            ]
-
-            // Add image parts back
-            for (const filePart of fileParts) {
-                contentParts.push({
-                    type: "image",
-                    image: filePart.url,
-                    mimeType: filePart.mediaType,
-                })
             }
-
-            enhancedMessages = [
-                ...enhancedMessages.slice(0, -1),
-                { ...lastModelMessage, content: contentParts },
-            ]
-        }
+            return undefined
+        },
     }
 
-    // Add cache point to the last assistant message in conversation history
-    // This caches the entire conversation prefix for subsequent requests
-    // Strategy: system (cached) + history with last assistant (cached) + new user message
-    if (shouldCache && enhancedMessages.length >= 2) {
-        // Find the last assistant message (should be second-to-last, before current user message)
-        for (let i = enhancedMessages.length - 2; i >= 0; i--) {
-            if (enhancedMessages[i].role === "assistant") {
-                enhancedMessages[i] = {
-                    ...enhancedMessages[i],
-                    providerOptions: {
-                        bedrock: { cachePoint: { type: "default" } },
+    function withResponseHeaders(
+        response: Response,
+        headers: Headers,
+    ): Response {
+        const mergedHeaders = new Headers(response.headers)
+        headers.forEach((value, key) => {
+            mergedHeaders.set(key, value)
+        })
+
+        return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: mergedHeaders,
+        })
+    }
+
+    function createAttemptHeaders(params: {
+        actualModelId: string
+        actualProvider: string
+        actualSelectedModelId?: string | null
+        attemptedSelectedModelIds: string[]
+    }): Headers {
+        return buildModelFailoverHeaders({
+            actualModelId: params.actualModelId,
+            actualProvider: params.actualProvider,
+            actualSelectedModelId: params.actualSelectedModelId,
+            requestedSelectedModelId: selectedModelId,
+            attemptedSelectedModelIds: params.attemptedSelectedModelIds,
+        })
+    }
+
+    async function createAttemptResult(
+        candidate?: FlattenedServerModel | null,
+    ): Promise<{
+        actualModelId: string
+        actualProvider: string
+        actualSelectedModelId?: string | null
+        response?: Response
+        result?: ReturnType<typeof streamText>
+    }> {
+        const clientOverrides = candidate
+            ? {
+                  ...baseClientOverrides,
+                  provider: candidate.provider,
+                  modelId: candidate.modelId,
+                  apiKeyEnv: candidate.apiKeyEnv,
+                  baseUrlEnv: candidate.baseUrlEnv,
+              }
+            : {
+                  ...baseClientOverrides,
+                  provider: selectedModelId?.startsWith("server:")
+                      ? undefined
+                      : baseClientOverrides.provider,
+                  modelId: selectedModelId?.startsWith("server:")
+                      ? undefined
+                      : baseClientOverrides.modelId,
+              }
+
+        console.log(
+            `[Client Overrides] provider: ${clientOverrides.provider}, modelId: ${clientOverrides.modelId}`,
+        )
+
+        const {
+            model,
+            providerOptions,
+            headers,
+            modelId,
+            provider: resolvedProvider,
+        } = getAIModel(clientOverrides)
+
+        const shouldCache = supportsPromptCaching(modelId)
+        console.log(
+            `[Prompt Caching] ${shouldCache ? "ENABLED" : "DISABLED"} for model: ${modelId}`,
+        )
+
+        const systemMessage = getSystemPrompt(modelId, minimalStyle)
+        const finalSystemMessage = customSystemMessage
+            ? `${systemMessage}\n\n## Custom Instructions\n${customSystemMessage}`
+            : systemMessage
+
+        if (fileParts.length > 0 && !supportsImageInput(modelId)) {
+            return {
+                actualModelId: modelId,
+                actualProvider: resolvedProvider,
+                actualSelectedModelId: candidate?.id ?? selectedModelId,
+                response: Response.json(
+                    {
+                        error: `The model "${modelId}" does not support image input. Please use a vision-capable model (e.g., GPT-4o, Claude, Gemini) or remove the image.`,
                     },
-                }
-                break // Only cache the last assistant message
+                    { status: 400 },
+                ),
             }
         }
-    }
 
-    // System messages with multiple cache breakpoints for optimal caching:
-    // - Breakpoint 1: System instructions + custom instructions - changes when user updates custom system message
-    // - Breakpoint 2: Current XML context - changes per diagram, but constant within a conversation turn
-    // Some providers (e.g. MiniMax) don't support multiple system messages
-    // Merge them into a single system message for compatibility
-    const isSingleSystemProvider = SINGLE_SYSTEM_PROVIDERS.has(resolvedProvider)
+        const geminiAssetFallbackResponse = await maybeHandleGeminiAssetRequest(
+            {
+                modelId,
+                userInputText,
+                xml,
+            },
+        )
+        if (geminiAssetFallbackResponse) {
+            return {
+                actualModelId: modelId,
+                actualProvider: resolvedProvider,
+                actualSelectedModelId: candidate?.id ?? selectedModelId,
+                response: geminiAssetFallbackResponse,
+            }
+        }
 
-    const xmlContext = `${
-        previousXml
-            ? `Previous diagram XML (before user's last message):
+        const modelMessages = await convertToModelMessages(messages)
+
+        console.log("[route.ts] Incoming messages count:", messages.length)
+        messages.forEach((msg: any, idx: number) => {
+            console.log(
+                `[route.ts] Message ${idx} role:`,
+                msg.role,
+                "parts count:",
+                msg.parts?.length,
+            )
+            if (msg.parts) {
+                msg.parts.forEach((part: any, partIdx: number) => {
+                    if (
+                        part.type === "tool-invocation" ||
+                        part.type === "tool-result"
+                    ) {
+                        console.log(`[route.ts]   Part ${partIdx}:`, {
+                            type: part.type,
+                            toolName: part.toolName,
+                            hasInput: !!part.input,
+                            inputType: typeof part.input,
+                            inputKeys:
+                                part.input && typeof part.input === "object"
+                                    ? Object.keys(part.input)
+                                    : null,
+                        })
+                    }
+                })
+            }
+        })
+
+        const canRewriteHistory = canRewriteHistoricalToolMessages(
+            resolvedProvider,
+            modelId,
+        )
+
+        const enableHistoryReplace =
+            process.env.ENABLE_HISTORY_XML_REPLACE === "true"
+        const placeholderMessages =
+            enableHistoryReplace && canRewriteHistory
+                ? replaceHistoricalToolInputs(modelMessages)
+                : modelMessages
+        const redactedMessages = canRewriteHistory
+            ? redactHistoricalToolResults(placeholderMessages)
+            : placeholderMessages
+
+        let enhancedMessages = redactedMessages.filter(
+            (msg: any) =>
+                msg.content &&
+                Array.isArray(msg.content) &&
+                msg.content.length > 0,
+        )
+
+        if (canRewriteHistory) {
+            enhancedMessages = enhancedMessages
+                .map((msg: any) => {
+                    if (
+                        msg.role !== "assistant" ||
+                        !Array.isArray(msg.content)
+                    ) {
+                        return msg
+                    }
+                    const filteredContent = msg.content.filter((part: any) => {
+                        if (part.type === "tool-call") {
+                            if (
+                                !part.input ||
+                                typeof part.input !== "object" ||
+                                Object.keys(part.input).length === 0
+                            ) {
+                                console.warn(
+                                    `[route.ts] Filtering out tool-call with invalid input:`,
+                                    {
+                                        toolName: part.toolName,
+                                        input: part.input,
+                                    },
+                                )
+                                return false
+                            }
+                        }
+                        return true
+                    })
+                    return { ...msg, content: filteredContent }
+                })
+                .filter((msg: any) => msg.content && msg.content.length > 0)
+        }
+
+        console.log("[route.ts] Model messages count:", enhancedMessages.length)
+        enhancedMessages.forEach((msg: any, idx: number) => {
+            console.log(
+                `[route.ts] ModelMsg ${idx} role:`,
+                msg.role,
+                "content count:",
+                msg.content?.length,
+            )
+            if (msg.content) {
+                msg.content.forEach((part: any, partIdx: number) => {
+                    if (
+                        part.type === "tool-call" ||
+                        part.type === "tool-result"
+                    ) {
+                        console.log(`[route.ts]   Content ${partIdx}:`, {
+                            type: part.type,
+                            toolName: part.toolName,
+                            hasInput: !!part.input,
+                            inputType: typeof part.input,
+                            inputValue:
+                                part.input === undefined
+                                    ? "undefined"
+                                    : part.input === null
+                                      ? "null"
+                                      : "object",
+                        })
+                    }
+                })
+            }
+        })
+
+        if (enhancedMessages.length >= 1) {
+            const lastModelMessage =
+                enhancedMessages[enhancedMessages.length - 1]
+            if (lastModelMessage.role === "user") {
+                const contentParts: any[] = [
+                    { type: "text", text: formattedUserInput },
+                ]
+
+                for (const filePart of fileParts) {
+                    contentParts.push({
+                        type: "image",
+                        image: filePart.url,
+                        mimeType: filePart.mediaType,
+                    })
+                }
+
+                enhancedMessages = [
+                    ...enhancedMessages.slice(0, -1),
+                    { ...lastModelMessage, content: contentParts },
+                ]
+            }
+        }
+
+        if (shouldCache && enhancedMessages.length >= 2) {
+            for (let i = enhancedMessages.length - 2; i >= 0; i--) {
+                if (enhancedMessages[i].role === "assistant") {
+                    enhancedMessages[i] = {
+                        ...enhancedMessages[i],
+                        providerOptions: {
+                            bedrock: { cachePoint: { type: "default" } },
+                        },
+                    }
+                    break
+                }
+            }
+        }
+
+        const isSingleSystemProvider =
+            SINGLE_SYSTEM_PROVIDERS.has(resolvedProvider)
+
+        const xmlContext = `${
+            previousXml
+                ? `Previous diagram XML (before user's last message):
 """xml
 ${previousXml}
 """
 
 `
-            : ""
-    }Current diagram XML (AUTHORITATIVE - the source of truth):
+                : ""
+        }Current diagram XML (AUTHORITATIVE - the source of truth):
 """xml
 ${xml || ""}
 """
 
 IMPORTANT: The "Current diagram XML" is the SINGLE SOURCE OF TRUTH for what's on the canvas right now. The user can manually add, delete, or modify shapes directly in draw.io. Always count and describe elements based on the CURRENT XML, not on what you previously generated. If both previous and current XML are shown, compare them to understand what the user changed. When using edit_diagram, COPY search patterns exactly from the CURRENT XML - attribute order matters!`
 
-    const systemMessages = isSingleSystemProvider
-        ? [
-              {
-                  role: "system" as const,
-                  content: `${finalSystemMessage}\n\n${xmlContext}`,
-              },
-          ]
-        : [
-              // Cache breakpoint 1: Instructions (+ optional custom instructions)
-              {
-                  role: "system" as const,
-                  content: finalSystemMessage,
-                  ...(shouldCache && {
-                      providerOptions: {
-                          bedrock: { cachePoint: { type: "default" } },
-                      },
-                  }),
-              },
-              // Cache breakpoint 2: Previous and Current diagram XML context
-              {
-                  role: "system" as const,
-                  content: xmlContext,
-                  ...(shouldCache && {
-                      providerOptions: {
-                          bedrock: { cachePoint: { type: "default" } },
-                      },
-                  }),
-              },
-          ]
+        const systemMessages = isSingleSystemProvider
+            ? [
+                  {
+                      role: "system" as const,
+                      content: `${finalSystemMessage}\n\n${xmlContext}`,
+                  },
+              ]
+            : [
+                  {
+                      role: "system" as const,
+                      content: finalSystemMessage,
+                      ...(shouldCache && {
+                          providerOptions: {
+                              bedrock: { cachePoint: { type: "default" } },
+                          },
+                      }),
+                  },
+                  {
+                      role: "system" as const,
+                      content: xmlContext,
+                      ...(shouldCache && {
+                          providerOptions: {
+                              bedrock: { cachePoint: { type: "default" } },
+                          },
+                      }),
+                  },
+              ]
 
-    const allMessages = [...systemMessages, ...enhancedMessages]
-    const maxToolSteps = Math.max(5, getMaxImportsPerRequest() + 5)
+        const allMessages = [...systemMessages, ...enhancedMessages]
+        const maxToolSteps = Math.max(5, getMaxImportsPerRequest() + 5)
 
-    const result = streamText({
-        model,
-        abortSignal: req.signal,
-        ...(process.env.MAX_OUTPUT_TOKENS && {
-            maxOutputTokens: parseInt(process.env.MAX_OUTPUT_TOKENS, 10),
-        }),
-        stopWhen: stepCountIs(maxToolSteps),
-        // Repair truncated tool calls when maxOutputTokens is reached mid-JSON
-        experimental_repairToolCall: async ({ toolCall, error }) => {
-            // DEBUG: Log what we're trying to repair
-            console.log(`[repairToolCall] Tool: ${toolCall.toolName}`)
-            console.log(
-                `[repairToolCall] Error: ${error.name} - ${error.message}`,
-            )
-            console.log(`[repairToolCall] Input type: ${typeof toolCall.input}`)
-            console.log(`[repairToolCall] Input value:`, toolCall.input)
-
-            // Only attempt repair for invalid tool input (broken JSON from truncation)
-            if (
-                error instanceof InvalidToolInputError ||
-                error.name === "AI_InvalidToolInputError"
-            ) {
-                try {
-                    // Pre-process to fix common LLM JSON errors that jsonrepair can't handle
-                    let inputToRepair = toolCall.input
-                    if (typeof inputToRepair === "string") {
-                        // Fix `:=` instead of `: ` (LLM sometimes generates this)
-                        inputToRepair = inputToRepair.replace(/:=/g, ": ")
-                        // Fix `= "` instead of `: "`
-                        inputToRepair = inputToRepair.replace(/=\s*"/g, ': "')
-                        // Fix inconsistent quote escaping in XML attributes within JSON strings
-                        // Pattern: attribute="value\" where opening quote is unescaped but closing is escaped
-                        // Example: y="-20\" should be y=\"-20\"
-                        inputToRepair = inputToRepair.replace(
-                            /(\w+)="([^"]*?)\\"/g,
-                            '$1=\\"$2\\"',
-                        )
-                    }
-                    // Use jsonrepair to fix truncated JSON
-                    const repairedInput = jsonrepair(inputToRepair)
-                    console.log(
-                        `[repairToolCall] Repaired truncated JSON for tool: ${toolCall.toolName}`,
-                    )
-                    return { ...toolCall, input: repairedInput }
-                } catch (repairError) {
-                    console.warn(
-                        `[repairToolCall] Failed to repair JSON for tool: ${toolCall.toolName}`,
-                        repairError,
-                    )
-                    // Return a placeholder input to avoid API errors in multi-step
-                    // The tool will fail gracefully on client side
-                    if (toolCall.toolName === "edit_diagram") {
-                        return {
-                            ...toolCall,
-                            input: {
-                                operations: [],
-                                _error: "JSON repair failed - no operations to apply",
-                            },
-                        }
-                    }
-                    if (toolCall.toolName === "display_diagram") {
-                        return {
-                            ...toolCall,
-                            input: {
-                                xml: "",
-                                _error: "JSON repair failed - empty diagram",
-                            },
-                        }
-                    }
-                    return null
-                }
-            }
-            // Don't attempt to repair other errors (like NoSuchToolError)
-            return null
-        },
-        messages: allMessages,
-        ...(providerOptions && { providerOptions }), // This now includes all reasoning configs
-        ...(headers && { headers }),
-        // Langfuse telemetry config (returns undefined if not configured)
-        ...(getTelemetryConfig({ sessionId: validSessionId, userId }) && {
-            experimental_telemetry: getTelemetryConfig({
-                sessionId: validSessionId,
-                userId,
+        const result = streamText({
+            model,
+            abortSignal: req.signal,
+            ...(process.env.MAX_OUTPUT_TOKENS && {
+                maxOutputTokens: parseInt(process.env.MAX_OUTPUT_TOKENS, 10),
             }),
-        }),
-        onFinish: ({ text, totalUsage }) => {
-            // AI SDK 6 telemetry auto-reports token usage on its spans
-            setTraceOutput(text)
+            stopWhen: stepCountIs(maxToolSteps),
+            experimental_repairToolCall: async ({ toolCall, error }) => {
+                console.log(`[repairToolCall] Tool: ${toolCall.toolName}`)
+                console.log(
+                    `[repairToolCall] Error: ${error.name} - ${error.message}`,
+                )
+                console.log(
+                    `[repairToolCall] Input type: ${typeof toolCall.input}`,
+                )
+                console.log(`[repairToolCall] Input value:`, toolCall.input)
 
-            // Record token usage for server-side quota tracking (if enabled)
-            // Use totalUsage (cumulative across all steps) instead of usage (final step only)
-            // Include all 4 token types: input, output, cache read, cache write
-            if (
-                isQuotaEnabled() &&
-                !hasOwnApiKey &&
-                userId !== "anonymous" &&
-                totalUsage
-            ) {
-                const totalTokens =
-                    (totalUsage.inputTokens || 0) +
-                    (totalUsage.outputTokens || 0) +
-                    (totalUsage.cachedInputTokens || 0) +
-                    (totalUsage.inputTokenDetails?.cacheWriteTokens || 0)
-                recordTokenUsage(userId, totalTokens)
-            }
-        },
-        tools: {
-            // Client-side tool that will be executed on the client
-            display_diagram: {
-                description: `Display a diagram on draw.io. Pass ONLY the mxCell elements - wrapper tags and root cells are added automatically.
+                if (
+                    error instanceof InvalidToolInputError ||
+                    error.name === "AI_InvalidToolInputError"
+                ) {
+                    try {
+                        let inputToRepair = toolCall.input
+                        if (typeof inputToRepair === "string") {
+                            inputToRepair = inputToRepair.replace(/:=/g, ": ")
+                            inputToRepair = inputToRepair.replace(
+                                /=\s*"/g,
+                                ': "',
+                            )
+                            inputToRepair = inputToRepair.replace(
+                                /(\w+)="([^"]*?)\\"/g,
+                                '$1=\\"$2\\"',
+                            )
+                        }
+                        const repairedInput = jsonrepair(inputToRepair)
+                        console.log(
+                            `[repairToolCall] Repaired truncated JSON for tool: ${toolCall.toolName}`,
+                        )
+                        return { ...toolCall, input: repairedInput }
+                    } catch (repairError) {
+                        console.warn(
+                            `[repairToolCall] Failed to repair JSON for tool: ${toolCall.toolName}`,
+                            repairError,
+                        )
+                        if (toolCall.toolName === "edit_diagram") {
+                            return {
+                                ...toolCall,
+                                input: {
+                                    operations: [],
+                                    _error: "JSON repair failed - no operations to apply",
+                                },
+                            }
+                        }
+                        if (toolCall.toolName === "display_diagram") {
+                            return {
+                                ...toolCall,
+                                input: {
+                                    xml: "",
+                                    _error: "JSON repair failed - empty diagram",
+                                },
+                            }
+                        }
+                        return null
+                    }
+                }
+                return null
+            },
+            messages: allMessages,
+            ...(providerOptions && { providerOptions }),
+            ...(headers && { headers }),
+            ...(telemetryConfig && {
+                experimental_telemetry: telemetryConfig,
+            }),
+            onFinish: ({ text, totalUsage }) => {
+                setTraceOutput(text)
+
+                if (
+                    isQuotaEnabled() &&
+                    !hasOwnApiKey &&
+                    userId !== "anonymous" &&
+                    totalUsage
+                ) {
+                    const totalTokens =
+                        (totalUsage.inputTokens || 0) +
+                        (totalUsage.outputTokens || 0) +
+                        (totalUsage.cachedInputTokens || 0) +
+                        (totalUsage.inputTokenDetails?.cacheWriteTokens || 0)
+                    recordTokenUsage(userId, totalTokens)
+                }
+            },
+            tools: {
+                // Client-side tool that will be executed on the client
+                display_diagram: {
+                    description: `Display a diagram on draw.io. Pass ONLY the mxCell elements - wrapper tags and root cells are added automatically.
 
 VALIDATION RULES (XML will be rejected if violated):
 1. Generate ONLY mxCell elements - NO wrapper tags (<mxfile>, <mxGraphModel>, <root>)
@@ -994,14 +1029,14 @@ Notes:
 - For AWS diagrams, use **AWS 2025 icons**.
 - For animated connectors, add "flowAnimation=1" to edge style.
 `,
-                inputSchema: z.object({
-                    xml: z
-                        .string()
-                        .describe("XML string to be displayed on draw.io"),
-                }),
-            },
-            edit_diagram: {
-                description: `Edit the current diagram by ID-based operations (update/add/delete cells).
+                    inputSchema: z.object({
+                        xml: z
+                            .string()
+                            .describe("XML string to be displayed on draw.io"),
+                    }),
+                },
+                edit_diagram: {
+                    description: `Edit the current diagram by ID-based operations (update/add/delete cells).
 
 Operations:
 - update: Replace an existing cell by its id. Provide cell_id and complete new_xml.
@@ -1017,33 +1052,33 @@ Example - Add a rectangle:
 
 Example - Delete container (children & edges auto-deleted):
 {"operations": [{"operation": "delete", "cell_id": "2"}]}`,
-                inputSchema: z.object({
-                    operations: z
-                        .array(
-                            z.object({
-                                operation: z
-                                    .enum(["update", "add", "delete"])
-                                    .describe(
-                                        "Operation to perform: add, update, or delete",
-                                    ),
-                                cell_id: z
-                                    .string()
-                                    .describe(
-                                        "The id of the mxCell. Must match the id attribute in new_xml.",
-                                    ),
-                                new_xml: z
-                                    .string()
-                                    .optional()
-                                    .describe(
-                                        "Complete mxCell XML element (required for update/add)",
-                                    ),
-                            }),
-                        )
-                        .describe("Array of operations to apply"),
-                }),
-            },
-            append_diagram: {
-                description: `Continue generating diagram XML when previous display_diagram output was truncated due to length limits.
+                    inputSchema: z.object({
+                        operations: z
+                            .array(
+                                z.object({
+                                    operation: z
+                                        .enum(["update", "add", "delete"])
+                                        .describe(
+                                            "Operation to perform: add, update, or delete",
+                                        ),
+                                    cell_id: z
+                                        .string()
+                                        .describe(
+                                            "The id of the mxCell. Must match the id attribute in new_xml.",
+                                        ),
+                                    new_xml: z
+                                        .string()
+                                        .optional()
+                                        .describe(
+                                            "Complete mxCell XML element (required for update/add)",
+                                        ),
+                                }),
+                            )
+                            .describe("Array of operations to apply"),
+                    }),
+                },
+                append_diagram: {
+                    description: `Continue generating diagram XML when previous display_diagram output was truncated due to length limits.
 
 WHEN TO USE: Only call this tool after display_diagram was truncated (you'll see an error message about truncation).
 
@@ -1054,16 +1089,16 @@ CRITICAL INSTRUCTIONS:
 4. If still truncated, call append_diagram again with the next fragment
 
 Example: If previous output ended with '<mxCell id="x" style="rounded=1', continue with ';" vertex="1">...' and complete the remaining elements.`,
-                inputSchema: z.object({
-                    xml: z
-                        .string()
-                        .describe(
-                            "Continuation XML fragment to append (NO wrapper tags)",
-                        ),
-                }),
-            },
-            get_shape_library: {
-                description: `Get draw.io shape/icon library documentation with style syntax and shape names.
+                    inputSchema: z.object({
+                        xml: z
+                            .string()
+                            .describe(
+                                "Continuation XML fragment to append (NO wrapper tags)",
+                            ),
+                    }),
+                },
+                get_shape_library: {
+                    description: `Get draw.io shape/icon library documentation with style syntax and shape names.
 
 Available libraries:
 - Cloud: aws4, azure2, gcp2, alibaba_cloud, openstack, salesforce
@@ -1076,183 +1111,295 @@ Available libraries:
 - Icons: webicons
 
 Call this tool to get shape names and usage syntax for a specific library.`,
-                inputSchema: z.object({
-                    library: z
-                        .string()
-                        .describe(
-                            "Library name (e.g., 'aws4', 'kubernetes', 'flowchart')",
-                        ),
-                }),
-                execute: async ({ library }) => {
-                    // Sanitize input - prevent path traversal attacks
-                    const sanitizedLibrary = library
-                        .toLowerCase()
-                        .replace(/[^a-z0-9_-]/g, "")
+                    inputSchema: z.object({
+                        library: z
+                            .string()
+                            .describe(
+                                "Library name (e.g., 'aws4', 'kubernetes', 'flowchart')",
+                            ),
+                    }),
+                    execute: async ({ library }) => {
+                        // Sanitize input - prevent path traversal attacks
+                        const sanitizedLibrary = library
+                            .toLowerCase()
+                            .replace(/[^a-z0-9_-]/g, "")
 
-                    if (sanitizedLibrary !== library.toLowerCase()) {
-                        return `Invalid library name "${library}". Use only letters, numbers, underscores, and hyphens.`
-                    }
-
-                    const baseDir = path.join(
-                        process.cwd(),
-                        "docs/shape-libraries",
-                    )
-                    const filePath = path.join(
-                        baseDir,
-                        `${sanitizedLibrary}.md`,
-                    )
-
-                    // Verify path stays within expected directory
-                    const resolvedPath = path.resolve(filePath)
-                    if (!resolvedPath.startsWith(path.resolve(baseDir))) {
-                        return `Invalid library path.`
-                    }
-
-                    try {
-                        const content = await fs.readFile(filePath, "utf-8")
-                        return content
-                    } catch (error) {
-                        if (
-                            (error as NodeJS.ErrnoException).code === "ENOENT"
-                        ) {
-                            return `Library "${library}" not found. Available: aws4, azure2, gcp2, alibaba_cloud, cisco19, kubernetes, network, bpmn, flowchart, basic, arrows2, vvd, salesforce, citrix, sap, mscae, atlassian, fluidpower, electrical, pid, cabinets, floorplan, webicons, infographic, sitemap, android, material_design, lean_mapping, openstack, rack`
+                        if (sanitizedLibrary !== library.toLowerCase()) {
+                            return `Invalid library name "${library}". Use only letters, numbers, underscores, and hyphens.`
                         }
-                        console.error(
-                            `[get_shape_library] Error loading "${library}":`,
-                            error,
+
+                        const baseDir = path.join(
+                            process.cwd(),
+                            "docs/shape-libraries",
                         )
-                        return `Error loading library "${library}". Please try again.`
-                    }
-                },
-            },
-            search_assets: {
-                description: `Search approved external asset sites for reusable SVG/PNG icons, illustrations, or templates. Only use when the user explicitly asks for external materials or downloads.`,
-                inputSchema: z.object({
-                    query: z
-                        .string()
-                        .min(1)
-                        .max(500)
-                        .describe("What kind of external asset to search for"),
-                    assetType: z
-                        .enum(["icon", "illustration", "template", "mixed"])
-                        .describe("Preferred asset category"),
-                    formats: z
-                        .array(z.enum(["svg", "png"]))
-                        .min(1)
-                        .max(2)
-                        .describe("Allowed downloadable formats"),
-                    maxResults: z
-                        .number()
-                        .int()
-                        .min(1)
-                        .max(8)
-                        .describe("Maximum number of search results to return"),
-                }),
-                execute: async ({ query, assetType, formats, maxResults }) => {
-                    try {
-                        const results = await searchAssets({
-                            query,
-                            assetType,
-                            formats,
-                            maxResults,
-                        })
+                        const filePath = path.join(
+                            baseDir,
+                            `${sanitizedLibrary}.md`,
+                        )
 
-                        return {
-                            query,
-                            assetType,
-                            formats,
-                            maxResults: Math.min(maxResults, 8),
-                            maxAutoImports: getMaxImportsPerRequest(),
-                            results,
+                        // Verify path stays within expected directory
+                        const resolvedPath = path.resolve(filePath)
+                        if (!resolvedPath.startsWith(path.resolve(baseDir))) {
+                            return `Invalid library path.`
                         }
-                    } catch (error) {
-                        return {
-                            query,
-                            assetType,
-                            formats,
-                            maxResults: Math.min(maxResults, 8),
-                            error:
-                                error instanceof Error
-                                    ? error.message
-                                    : "Asset search failed.",
-                        }
-                    }
-                },
-            },
-            import_asset: {
-                description: `Download, validate, sanitize, and convert a reusable SVG/PNG asset into a draw.io-ready data URL. Only use this after search_assets returns an importable result.`,
-                inputSchema: z.object({
-                    assetUrl: z
-                        .string()
-                        .url()
-                        .describe(
-                            "Direct SVG or PNG asset URL returned by search_assets",
-                        ),
-                    pageUrl: z
-                        .string()
-                        .url()
-                        .describe(
-                            "Original source page URL for license verification",
-                        ),
-                    label: z
-                        .string()
-                        .max(120)
-                        .optional()
-                        .describe("Short label to show under the image"),
-                    placementHint: z
-                        .string()
-                        .max(200)
-                        .optional()
-                        .describe(
-                            "Optional placement note for later diagram insertion",
-                        ),
-                }),
-                execute: async ({
-                    assetUrl,
-                    pageUrl,
-                    label,
-                    placementHint,
-                }) => {
-                    try {
-                        return await importAsset({
-                            assetUrl,
-                            pageUrl,
-                            label,
-                            placementHint,
-                        })
-                    } catch (error) {
-                        return {
-                            assetUrl,
-                            pageUrl,
-                            label,
-                            placementHint,
-                            error:
-                                error instanceof Error
-                                    ? error.message
-                                    : "Asset import failed.",
-                        }
-                    }
-                },
-            },
-        },
-        ...(process.env.TEMPERATURE !== undefined && {
-            temperature: parseFloat(process.env.TEMPERATURE),
-        }),
-    })
 
-    return result.toUIMessageStreamResponse({
-        sendReasoning: true,
-        messageMetadata: ({ part }) => {
-            if (part.type === "finish") {
-                const usage = (part as any).totalUsage
-                // AI SDK 6 provides totalTokens directly
-                return {
-                    totalTokens: usage?.totalTokens ?? 0,
-                    finishReason: (part as any).finishReason,
+                        try {
+                            const content = await fs.readFile(filePath, "utf-8")
+                            return content
+                        } catch (error) {
+                            if (
+                                (error as NodeJS.ErrnoException).code ===
+                                "ENOENT"
+                            ) {
+                                return `Library "${library}" not found. Available: aws4, azure2, gcp2, alibaba_cloud, cisco19, kubernetes, network, bpmn, flowchart, basic, arrows2, vvd, salesforce, citrix, sap, mscae, atlassian, fluidpower, electrical, pid, cabinets, floorplan, webicons, infographic, sitemap, android, material_design, lean_mapping, openstack, rack`
+                            }
+                            console.error(
+                                `[get_shape_library] Error loading "${library}":`,
+                                error,
+                            )
+                            return `Error loading library "${library}". Please try again.`
+                        }
+                    },
+                },
+                search_assets: {
+                    description: `Search approved external asset sites for reusable SVG/PNG icons, illustrations, or templates. Only use when the user explicitly asks for external materials or downloads.`,
+                    inputSchema: z.object({
+                        query: z
+                            .string()
+                            .min(1)
+                            .max(500)
+                            .describe(
+                                "What kind of external asset to search for",
+                            ),
+                        assetType: z
+                            .enum(["icon", "illustration", "template", "mixed"])
+                            .describe("Preferred asset category"),
+                        formats: z
+                            .array(z.enum(["svg", "png"]))
+                            .min(1)
+                            .max(2)
+                            .describe("Allowed downloadable formats"),
+                        maxResults: z
+                            .number()
+                            .int()
+                            .min(1)
+                            .max(8)
+                            .describe(
+                                "Maximum number of search results to return",
+                            ),
+                    }),
+                    execute: async ({
+                        query,
+                        assetType,
+                        formats,
+                        maxResults,
+                    }) => {
+                        try {
+                            const results = await searchAssets({
+                                query,
+                                assetType,
+                                formats,
+                                maxResults,
+                            })
+
+                            return {
+                                query,
+                                assetType,
+                                formats,
+                                maxResults: Math.min(maxResults, 8),
+                                maxAutoImports: getMaxImportsPerRequest(),
+                                results,
+                            }
+                        } catch (error) {
+                            return {
+                                query,
+                                assetType,
+                                formats,
+                                maxResults: Math.min(maxResults, 8),
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : "Asset search failed.",
+                            }
+                        }
+                    },
+                },
+                import_asset: {
+                    description: `Download, validate, sanitize, and convert a reusable SVG/PNG asset into a draw.io-ready data URL. Only use this after search_assets returns an importable result.`,
+                    inputSchema: z.object({
+                        assetUrl: z
+                            .string()
+                            .url()
+                            .describe(
+                                "Direct SVG or PNG asset URL returned by search_assets",
+                            ),
+                        pageUrl: z
+                            .string()
+                            .url()
+                            .describe(
+                                "Original source page URL for license verification",
+                            ),
+                        label: z
+                            .string()
+                            .max(120)
+                            .optional()
+                            .describe("Short label to show under the image"),
+                        placementHint: z
+                            .string()
+                            .max(200)
+                            .optional()
+                            .describe(
+                                "Optional placement note for later diagram insertion",
+                            ),
+                    }),
+                    execute: async ({
+                        assetUrl,
+                        pageUrl,
+                        label,
+                        placementHint,
+                    }) => {
+                        try {
+                            return await importAsset({
+                                assetUrl,
+                                pageUrl,
+                                label,
+                                placementHint,
+                            })
+                        } catch (error) {
+                            return {
+                                assetUrl,
+                                pageUrl,
+                                label,
+                                placementHint,
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : "Asset import failed.",
+                            }
+                        }
+                    },
+                },
+            },
+            ...(process.env.TEMPERATURE !== undefined && {
+                temperature: parseFloat(process.env.TEMPERATURE),
+            }),
+        })
+
+        return {
+            actualModelId: modelId,
+            actualProvider: resolvedProvider,
+            actualSelectedModelId: candidate?.id ?? selectedModelId,
+            result,
+        }
+    }
+
+    async function createBufferedAttemptResponse(params: {
+        actualModelId: string
+        actualProvider: string
+        actualSelectedModelId?: string | null
+        attemptedSelectedModelIds: string[]
+        result: ReturnType<typeof streamText>
+    }): Promise<Response> {
+        const stream = params.result.toUIMessageStream(uiMessageStreamOptions)
+        const chunks: any[] = []
+
+        for await (const chunk of stream) {
+            if (chunk.type === "error") {
+                throw new Error(
+                    chunk.errorText || "Model stream failed before completion.",
+                )
+            }
+            chunks.push(chunk)
+        }
+
+        return createUIMessageStreamResponse({
+            headers: createAttemptHeaders({
+                actualModelId: params.actualModelId,
+                actualProvider: params.actualProvider,
+                actualSelectedModelId: params.actualSelectedModelId,
+                attemptedSelectedModelIds: params.attemptedSelectedModelIds,
+            }),
+            stream: createUIMessageStream({
+                execute: ({ writer }) => {
+                    for (const chunk of chunks) {
+                        writer.write(chunk)
+                    }
+                },
+            }),
+        })
+    }
+
+    if (serverModelCandidates.length > 0) {
+        const attemptedSelectedModelIds: string[] = []
+
+        for (const candidate of serverModelCandidates) {
+            attemptedSelectedModelIds.push(candidate.id)
+
+            try {
+                const attempt = await createAttemptResult(candidate)
+                const headers = createAttemptHeaders({
+                    actualModelId: attempt.actualModelId,
+                    actualProvider: attempt.actualProvider,
+                    actualSelectedModelId: attempt.actualSelectedModelId,
+                    attemptedSelectedModelIds,
+                })
+
+                if (attempt.response) {
+                    return withResponseHeaders(attempt.response, headers)
+                }
+
+                if (!attempt.result) {
+                    throw new Error(
+                        "Model attempt finished without a response stream.",
+                    )
+                }
+
+                return await createBufferedAttemptResponse({
+                    actualModelId: attempt.actualModelId,
+                    actualProvider: attempt.actualProvider,
+                    actualSelectedModelId: attempt.actualSelectedModelId,
+                    attemptedSelectedModelIds,
+                    result: attempt.result,
+                })
+            } catch (error) {
+                const canFailover =
+                    attemptedSelectedModelIds.length <
+                        serverModelCandidates.length &&
+                    shouldFailoverToNextModel(error)
+
+                console.warn(
+                    `[Model Failover] Attempt failed for ${candidate.id}:`,
+                    error,
+                )
+
+                if (!canFailover) {
+                    throw error
                 }
             }
-            return undefined
-        },
+        }
+    }
+
+    const attempt = await createAttemptResult()
+    const headers = createAttemptHeaders({
+        actualModelId: attempt.actualModelId,
+        actualProvider: attempt.actualProvider,
+        actualSelectedModelId: attempt.actualSelectedModelId,
+        attemptedSelectedModelIds: selectedModelId?.startsWith("server:")
+            ? [selectedModelId]
+            : [],
+    })
+
+    if (attempt.response) {
+        return withResponseHeaders(attempt.response, headers)
+    }
+
+    if (!attempt.result) {
+        throw new Error("Chat route completed without a response stream.")
+    }
+
+    return attempt.result.toUIMessageStreamResponse({
+        ...uiMessageStreamOptions,
+        headers,
     })
 }
 
