@@ -46,6 +46,18 @@ export function shouldFailoverToNextModel(error: unknown): boolean {
     if (!message) return false
 
     return [
+        "authentication failed",
+        "check your credentials",
+        "invalid api key",
+        "invalid authentication",
+        "unauthorized",
+        "forbidden",
+        "invalid token",
+        "无效的令牌",
+        "令牌无效",
+        "凭证无效",
+        "missing a thought_signature",
+        "thought_signature",
         "cannot connect to api",
         "fetch failed",
         "network error",

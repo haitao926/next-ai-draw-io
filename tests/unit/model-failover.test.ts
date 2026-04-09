@@ -28,6 +28,34 @@ describe("shouldFailoverToNextModel", () => {
             ),
         ).toBe(false)
     })
+
+    it("treats auth-style streamed errors as retryable", () => {
+        expect(
+            shouldFailoverToNextModel(
+                new Error(
+                    "Authentication failed. Please check your credentials.",
+                ),
+            ),
+        ).toBe(true)
+    })
+
+    it("treats Gemini thought_signature failures as retryable", () => {
+        expect(
+            shouldFailoverToNextModel(
+                new Error(
+                    "Function call is missing a thought_signature in functionCall parts.",
+                ),
+            ),
+        ).toBe(true)
+    })
+
+    it("treats localized invalid token errors as retryable", () => {
+        expect(
+            shouldFailoverToNextModel(
+                new Error("无效的令牌 (request id: test)"),
+            ),
+        ).toBe(true)
+    })
 })
 
 describe("buildModelFailoverHeaders", () => {
