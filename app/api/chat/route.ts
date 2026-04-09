@@ -21,7 +21,9 @@ import {
 } from "@/lib/ai-providers"
 import {
     getMaxImportsPerRequest,
+    type ImportedAsset,
     importAsset,
+    type SearchAssetResult,
     searchAssets,
 } from "@/lib/asset-tools"
 import { findCachedResponse } from "@/lib/cached-responses"
@@ -48,6 +50,342 @@ import { getSystemPrompt } from "@/lib/system-prompts"
 import { getUserIdFromRequest } from "@/lib/user-id"
 
 export const maxDuration = 120
+
+const GEMINI_MODEL_PATTERN = /gemini/i
+const ASSET_ACTION_PATTERN =
+    /(search|find|download|import|insert|add|搜|搜索|查找|下载|导入|插入|添加)/i
+const ASSET_NOUN_PATTERN =
+    /(asset|assets|icon|icons|illustration|template|svg|png|素材|图标|插图|模板|矢量)/i
+const KNOWN_ASSET_SITE_PATTERN =
+    /(bioicons|scidraw|phylopic|smart|swissbiopics|iconfinder|iconfont)/i
+
+interface AssetPlacement {
+    x: number
+    y: number
+}
+
+function isGeminiLikeModel(modelId: string): boolean {
+    return GEMINI_MODEL_PATTERN.test(modelId)
+}
+
+function isExplicitExternalAssetRequest(text: string): boolean {
+    const normalized = text.trim()
+    if (!normalized) return false
+
+    return (
+        (ASSET_ACTION_PATTERN.test(normalized) &&
+            ASSET_NOUN_PATTERN.test(normalized)) ||
+        KNOWN_ASSET_SITE_PATTERN.test(normalized)
+    )
+}
+
+function inferAssetType(
+    text: string,
+): "icon" | "illustration" | "template" | "mixed" {
+    if (/(template|模板)/i.test(text)) return "template"
+    if (/(illustration|插图|示意图)/i.test(text)) return "illustration"
+    if (/(icon|图标|素材|矢量)/i.test(text)) return "icon"
+    return "mixed"
+}
+
+function inferAssetFormats(text: string): Array<"svg" | "png"> {
+    const wantsSvg = /(svg|矢量)/i.test(text)
+    const wantsPng = /(png)/i.test(text)
+
+    if (wantsSvg && wantsPng) return ["svg", "png"]
+    if (wantsPng && !wantsSvg) return ["png"]
+    return ["svg", "png"]
+}
+
+function escapeXml(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/'/g, "&apos;")
+}
+
+function sanitizeLabel(value: string | undefined, fallback: string): string {
+    const candidate = (value || fallback).trim()
+    return candidate.length > 0 ? candidate.slice(0, 80) : fallback
+}
+
+function getGeometryBounds(xml: string): { maxRight: number; minTop: number } {
+    let maxRight = 0
+    let minTop = Number.POSITIVE_INFINITY
+
+    for (const match of xml.matchAll(/<mxGeometry\b[^>]*>/g)) {
+        const tag = match[0]
+        const x = Number(tag.match(/\bx="([^"]+)"/)?.[1] || "")
+        const y = Number(tag.match(/\by="([^"]+)"/)?.[1] || "")
+        const width = Number(tag.match(/\bwidth="([^"]+)"/)?.[1] || "")
+        const height = Number(tag.match(/\bheight="([^"]+)"/)?.[1] || "")
+
+        if (
+            Number.isFinite(x) &&
+            Number.isFinite(y) &&
+            Number.isFinite(width) &&
+            Number.isFinite(height)
+        ) {
+            maxRight = Math.max(maxRight, x + width)
+            minTop = Math.min(minTop, y)
+        }
+    }
+
+    return {
+        maxRight,
+        minTop: Number.isFinite(minTop) ? minTop : 40,
+    }
+}
+
+function getAssetPlacement(
+    index: number,
+    total: number,
+    xml: string,
+): AssetPlacement {
+    if (!xml || isMinimalDiagram(xml)) {
+        const columns = total >= 3 ? 3 : 2
+        const column = index % columns
+        const row = Math.floor(index / columns)
+
+        return {
+            x: 40 + column * 240,
+            y: 40 + row * 260,
+        }
+    }
+
+    const bounds = getGeometryBounds(xml)
+    return {
+        x: bounds.maxRight + 80,
+        y: bounds.minTop + index * 260,
+    }
+}
+
+function buildAssetCells(
+    asset: ImportedAsset,
+    index: number,
+    total: number,
+    xml: string,
+): { cellId: string; xml: string } {
+    const placement = getAssetPlacement(index, total, xml)
+    const maxImageWidth = 180
+    const maxImageHeight = 160
+    const width = Math.max(asset.width || 128, 1)
+    const height = Math.max(asset.height || 128, 1)
+    const scale = Math.min(maxImageWidth / width, maxImageHeight / height, 1)
+    const imageWidth = Math.max(64, Math.round(width * scale))
+    const imageHeight = Math.max(64, Math.round(height * scale))
+    const label = sanitizeLabel(asset.label, asset.attribution)
+    const baseId = `asset-${Date.now()}-${index}`
+
+    const imageCell = `<mxCell id="${baseId}" value="" style="shape=image;aspect=fixed;html=1;image=${escapeXml(asset.dataUrl)};align=center;verticalAlign=top;" vertex="1" parent="1"><mxGeometry x="${placement.x}" y="${placement.y}" width="${imageWidth}" height="${imageHeight}" as="geometry"/></mxCell>`
+    const labelCell = `<mxCell id="${baseId}-label" value="${escapeXml(label)}" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=top;whiteSpace=wrap;fontSize=12;" vertex="1" parent="1"><mxGeometry x="${placement.x - 20}" y="${placement.y + imageHeight + 12}" width="${imageWidth + 40}" height="34" as="geometry"/></mxCell>`
+
+    return {
+        cellId: baseId,
+        xml: `${imageCell}\n${labelCell}`,
+    }
+}
+
+function buildAssetSummary(params: {
+    importedAssets: ImportedAsset[]
+    searchResults: SearchAssetResult[]
+    searchError?: string
+    importErrors: string[]
+}): string {
+    const lines: string[] = []
+
+    if (params.importedAssets.length > 0) {
+        lines.push(`已导入 ${params.importedAssets.length} 个外部素材到画布。`)
+        for (const asset of params.importedAssets) {
+            lines.push(
+                `- ${sanitizeLabel(asset.label, asset.attribution)} | ${asset.source} | ${asset.license} | ${asset.pageUrl}`,
+            )
+        }
+    } else if (params.searchResults.length > 0) {
+        lines.push("已完成素材搜索，但当前没有可自动导入的结果。")
+        for (const result of params.searchResults.slice(0, 5)) {
+            lines.push(
+                `- ${result.title} | ${result.source} | ${result.license || "license unknown"} | ${result.pageUrl}`,
+            )
+        }
+    }
+
+    if (params.searchError) {
+        lines.push(`搜索失败：${params.searchError}`)
+    }
+
+    for (const error of params.importErrors) {
+        lines.push(`导入失败：${error}`)
+    }
+
+    return lines.join("\n")
+}
+
+function createDirectAssetResponse(params: {
+    xml: string
+    importedAssets: ImportedAsset[]
+    searchResults: SearchAssetResult[]
+    searchError?: string
+    importErrors: string[]
+}): Response {
+    const toolCallId = `asset-fallback-${Date.now()}`
+    const summary = buildAssetSummary(params)
+
+    const stream = createUIMessageStream({
+        execute: async ({ writer }) => {
+            writer.write({ type: "start" })
+
+            if (summary) {
+                writer.write({ type: "text-start", id: "0" })
+                writer.write({ type: "text-delta", id: "0", delta: summary })
+                writer.write({ type: "text-end", id: "0" })
+            }
+
+            if (params.importedAssets.length > 0) {
+                const toolName =
+                    !params.xml || isMinimalDiagram(params.xml)
+                        ? "display_diagram"
+                        : "edit_diagram"
+
+                if (toolName === "display_diagram") {
+                    const diagramXml = params.importedAssets
+                        .map(
+                            (asset, index) =>
+                                buildAssetCells(
+                                    asset,
+                                    index,
+                                    params.importedAssets.length,
+                                    params.xml,
+                                ).xml,
+                        )
+                        .join("\n")
+
+                    writer.write({
+                        type: "tool-input-start",
+                        toolCallId,
+                        toolName,
+                    })
+                    writer.write({
+                        type: "tool-input-delta",
+                        toolCallId,
+                        inputTextDelta: diagramXml,
+                    })
+                    writer.write({
+                        type: "tool-input-available",
+                        toolCallId,
+                        toolName,
+                        input: { xml: diagramXml },
+                    })
+                } else {
+                    const operations = params.importedAssets.flatMap(
+                        (asset, index) => {
+                            const cell = buildAssetCells(
+                                asset,
+                                index,
+                                params.importedAssets.length,
+                                params.xml,
+                            )
+
+                            return cell.xml
+                                .split("\n")
+                                .map((newXml, xmlIndex) => ({
+                                    operation: "add" as const,
+                                    cell_id:
+                                        xmlIndex === 0
+                                            ? cell.cellId
+                                            : `${cell.cellId}-label`,
+                                    new_xml: newXml,
+                                }))
+                        },
+                    )
+
+                    writer.write({
+                        type: "tool-input-start",
+                        toolCallId,
+                        toolName,
+                    })
+                    writer.write({
+                        type: "tool-input-delta",
+                        toolCallId,
+                        inputTextDelta: JSON.stringify({ operations }),
+                    })
+                    writer.write({
+                        type: "tool-input-available",
+                        toolCallId,
+                        toolName,
+                        input: { operations },
+                    })
+                }
+            }
+
+            writer.write({ type: "finish" })
+        },
+    })
+
+    return createUIMessageStreamResponse({ stream })
+}
+
+async function maybeHandleGeminiAssetRequest(params: {
+    modelId: string
+    userInputText: string
+    xml: string
+}): Promise<Response | null> {
+    if (!isGeminiLikeModel(params.modelId)) {
+        return null
+    }
+
+    if (!isExplicitExternalAssetRequest(params.userInputText)) {
+        return null
+    }
+
+    const maxImports = getMaxImportsPerRequest()
+    const importErrors: string[] = []
+    let searchResults: SearchAssetResult[] = []
+    let searchError: string | undefined
+
+    try {
+        searchResults = await searchAssets({
+            query: params.userInputText.slice(0, 500),
+            assetType: inferAssetType(params.userInputText),
+            formats: inferAssetFormats(params.userInputText),
+            maxResults: maxImports,
+        })
+    } catch (error) {
+        searchError =
+            error instanceof Error ? error.message : "Asset search failed."
+    }
+
+    const importedAssets: ImportedAsset[] = []
+
+    for (const result of searchResults) {
+        if (!result.importable) continue
+        if (importedAssets.length >= maxImports) break
+
+        try {
+            importedAssets.push(
+                await importAsset({
+                    assetUrl: result.assetUrl,
+                    pageUrl: result.pageUrl,
+                    label: sanitizeLabel(undefined, result.title),
+                }),
+            )
+        } catch (error) {
+            importErrors.push(
+                error instanceof Error ? error.message : "Asset import failed.",
+            )
+        }
+    }
+
+    return createDirectAssetResponse({
+        xml: params.xml,
+        importedAssets,
+        searchResults,
+        searchError,
+        importErrors,
+    })
+}
 
 // Helper function to create cached stream response
 function createCachedStreamResponse(xml: string): Response {
@@ -282,6 +620,15 @@ async function handleChatRequest(req: Request): Promise<Response> {
             },
             { status: 400 },
         )
+    }
+
+    const geminiAssetFallbackResponse = await maybeHandleGeminiAssetRequest({
+        modelId,
+        userInputText,
+        xml,
+    })
+    if (geminiAssetFallbackResponse) {
+        return geminiAssetFallbackResponse
     }
 
     // User input only - XML is now in a separate cached system message
