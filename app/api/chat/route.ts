@@ -26,6 +26,7 @@ import {
 } from "@/lib/asset-tools"
 import { findCachedResponse } from "@/lib/cached-responses"
 import {
+    canRewriteHistoricalToolMessages,
     isMinimalDiagram,
     redactHistoricalToolResults,
     replaceHistoricalToolInputs,
@@ -322,14 +323,24 @@ ${userInputText}
         }
     })
 
-    // Replace historical tool call XML with placeholders to reduce tokens
+    // Replace historical tool call XML with placeholders to reduce tokens.
+    // Some providers (notably Gemini/Google) attach provider-specific signatures
+    // to tool-call history, so we must not rewrite or filter those messages.
+    const canRewriteHistory = canRewriteHistoricalToolMessages(
+        resolvedProvider,
+        modelId,
+    )
+
     // Disabled by default - some models (e.g. minimax) copy placeholders instead of generating XML
     const enableHistoryReplace =
         process.env.ENABLE_HISTORY_XML_REPLACE === "true"
-    const placeholderMessages = enableHistoryReplace
-        ? replaceHistoricalToolInputs(modelMessages)
-        : modelMessages
-    const redactedMessages = redactHistoricalToolResults(placeholderMessages)
+    const placeholderMessages =
+        enableHistoryReplace && canRewriteHistory
+            ? replaceHistoricalToolInputs(modelMessages)
+            : modelMessages
+    const redactedMessages = canRewriteHistory
+        ? redactHistoricalToolResults(placeholderMessages)
+        : placeholderMessages
 
     // Filter out messages with empty content arrays (Bedrock API rejects these)
     // This is a safety measure - ideally convertToModelMessages should handle all cases
@@ -338,33 +349,35 @@ ${userInputText}
             msg.content && Array.isArray(msg.content) && msg.content.length > 0,
     )
 
-    // Filter out tool-calls with invalid inputs (from failed repair or interrupted streaming)
-    // Bedrock API rejects messages where toolUse.input is not a valid JSON object
-    enhancedMessages = enhancedMessages
-        .map((msg: any) => {
-            if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
-                return msg
-            }
-            const filteredContent = msg.content.filter((part: any) => {
-                if (part.type === "tool-call") {
-                    // Check if input is a valid object (not null, undefined, or empty)
-                    if (
-                        !part.input ||
-                        typeof part.input !== "object" ||
-                        Object.keys(part.input).length === 0
-                    ) {
-                        console.warn(
-                            `[route.ts] Filtering out tool-call with invalid input:`,
-                            { toolName: part.toolName, input: part.input },
-                        )
-                        return false
-                    }
+    // Filter out tool-calls with invalid inputs (from failed repair or interrupted streaming).
+    // Keep Google/Gemini histories intact so provider metadata such as thought signatures survives.
+    if (canRewriteHistory) {
+        enhancedMessages = enhancedMessages
+            .map((msg: any) => {
+                if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
+                    return msg
                 }
-                return true
+                const filteredContent = msg.content.filter((part: any) => {
+                    if (part.type === "tool-call") {
+                        // Check if input is a valid object (not null, undefined, or empty)
+                        if (
+                            !part.input ||
+                            typeof part.input !== "object" ||
+                            Object.keys(part.input).length === 0
+                        ) {
+                            console.warn(
+                                `[route.ts] Filtering out tool-call with invalid input:`,
+                                { toolName: part.toolName, input: part.input },
+                            )
+                            return false
+                        }
+                    }
+                    return true
+                })
+                return { ...msg, content: filteredContent }
             })
-            return { ...msg, content: filteredContent }
-        })
-        .filter((msg: any) => msg.content && msg.content.length > 0)
+            .filter((msg: any) => msg.content && msg.content.length > 0)
+    }
 
     // DEBUG: Log modelMessages structure (what's being sent to AI)
     console.log("[route.ts] Model messages count:", enhancedMessages.length)

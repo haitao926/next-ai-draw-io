@@ -47,6 +47,26 @@ export function isMinimalDiagram(xml: string): boolean {
     return !stripped.includes('id="2"')
 }
 
+// Some providers attach provider-specific signatures to tool-call history.
+// Rewriting those messages can invalidate subsequent tool calls.
+export function canRewriteHistoricalToolMessages(
+    provider?: string | null,
+    modelId?: string | null,
+): boolean {
+    const normalizedProvider = provider?.toLowerCase() || ""
+    const normalizedModelId = modelId?.toLowerCase() || ""
+
+    if (normalizedProvider === "google") {
+        return false
+    }
+
+    if (normalizedModelId.includes("gemini")) {
+        return false
+    }
+
+    return true
+}
+
 // Helper function to replace historical tool call XML with placeholders
 // This reduces token usage and forces LLM to rely on the current diagram XML (source of truth)
 // Also fixes invalid/undefined inputs from interrupted streaming

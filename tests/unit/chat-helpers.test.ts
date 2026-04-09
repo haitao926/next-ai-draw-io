@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
 import {
+    canRewriteHistoricalToolMessages,
     isMinimalDiagram,
     redactHistoricalToolResults,
     replaceHistoricalToolInputs,
@@ -83,6 +84,24 @@ describe("isMinimalDiagram", () => {
     it("handles whitespace correctly", () => {
         const xml = '  <mxCell id="0"/>  <mxCell id="1" parent="0"/>  '
         expect(isMinimalDiagram(xml)).toBe(true)
+    })
+})
+
+describe("canRewriteHistoricalToolMessages", () => {
+    it("disables history rewriting for google provider", () => {
+        expect(
+            canRewriteHistoricalToolMessages("google", "gemini-3.1-flash"),
+        ).toBe(false)
+    })
+
+    it("disables history rewriting for gemini model ids", () => {
+        expect(
+            canRewriteHistoricalToolMessages("openai", "gemini-2.5-pro"),
+        ).toBe(false)
+    })
+
+    it("keeps history rewriting enabled for non-gemini providers", () => {
+        expect(canRewriteHistoricalToolMessages("openai", "gpt-5.4")).toBe(true)
     })
 })
 
