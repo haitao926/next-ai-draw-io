@@ -56,6 +56,37 @@ function OperationsDisplay({ operations }: { operations: DiagramOperation[] }) {
     )
 }
 
+function redactDisplayValue(value: unknown): unknown {
+    if (typeof value === "string") {
+        return value.startsWith("data:image/") ? "[data image omitted]" : value
+    }
+
+    if (Array.isArray(value)) {
+        return value.map((item) => redactDisplayValue(item))
+    }
+
+    if (value && typeof value === "object") {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, nestedValue]) => [
+                key,
+                key === "dataUrl"
+                    ? "[data image omitted]"
+                    : redactDisplayValue(nestedValue),
+            ]),
+        )
+    }
+
+    return value
+}
+
+function stringifyToolValue(value: unknown): string {
+    if (typeof value === "string") {
+        return value
+    }
+
+    return JSON.stringify(redactDisplayValue(value), null, 2)
+}
+
 export function ToolCallCard({
     part,
     expandedTools,
@@ -85,8 +116,14 @@ export function ToolCallCard({
                 return "Generate Diagram"
             case "edit_diagram":
                 return "Edit Diagram"
+            case "append_diagram":
+                return "Continue Diagram"
             case "get_shape_library":
                 return "Get Shape Library"
+            case "search_assets":
+                return "Search Assets"
+            case "import_asset":
+                return "Import Asset"
             default:
                 return name
         }
@@ -111,6 +148,14 @@ export function ToolCallCard({
             typeof output === "string"
         ) {
             textToCopy = output
+        } else if (
+            output &&
+            state === "output-available" &&
+            (toolName === "search_assets" ||
+                toolName === "import_asset" ||
+                typeof output === "object")
+        ) {
+            textToCopy = stringifyToolValue(output)
         }
 
         if (textToCopy) {
@@ -209,7 +254,7 @@ export function ToolCallCard({
                     ) : null}
                 </div>
             )}
-            {output &&
+            {Boolean(output) &&
                 state === "output-error" &&
                 (() => {
                     const isTruncated =
@@ -222,29 +267,43 @@ export function ToolCallCard({
                         >
                             {isTruncated
                                 ? "Output truncated due to length limits. Try a simpler request or increase the maxOutputLength."
-                                : output}
+                                : typeof output === "string"
+                                  ? output
+                                  : stringifyToolValue(output)}
                         </div>
                     )
                 })()}
-            {/* Show get_shape_library output on success */}
-            {output &&
-                toolName === "get_shape_library" &&
-                state === "output-available" &&
-                isExpanded && (
-                    <div className="px-4 py-3 border-t border-border/40">
-                        <div className="text-xs text-muted-foreground mb-2">
-                            Library loaded (
-                            {typeof output === "string" ? output.length : 0}{" "}
-                            chars)
-                        </div>
+            {/* Show successful tool output */}
+            {Boolean(output) && state === "output-available" && isExpanded && (
+                <div className="px-4 py-3 border-t border-border/40">
+                    {toolName === "get_shape_library" &&
+                    typeof output === "string" ? (
+                        <>
+                            <div className="text-xs text-muted-foreground mb-2">
+                                Library loaded ({output.length} chars)
+                            </div>
+                            <pre className="text-xs bg-muted/50 p-2 rounded-md overflow-auto max-h-32 whitespace-pre-wrap">
+                                {output.substring(0, 800) +
+                                    (output.length > 800 ? "\n..." : "")}
+                            </pre>
+                        </>
+                    ) : typeof output === "object" ? (
+                        <>
+                            <div className="text-xs text-muted-foreground mb-2">
+                                Result
+                            </div>
+                            <CodeBlock
+                                code={stringifyToolValue(output)}
+                                language="json"
+                            />
+                        </>
+                    ) : typeof output === "string" ? (
                         <pre className="text-xs bg-muted/50 p-2 rounded-md overflow-auto max-h-32 whitespace-pre-wrap">
-                            {typeof output === "string"
-                                ? output.substring(0, 800) +
-                                  (output.length > 800 ? "\n..." : "")
-                                : String(output)}
+                            {output}
                         </pre>
-                    </div>
-                )}
+                    ) : null}
+                </div>
+            )}
         </div>
     )
 }

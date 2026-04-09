@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest"
 import {
     isMinimalDiagram,
+    redactHistoricalToolResults,
     replaceHistoricalToolInputs,
     validateFileParts,
 } from "@/lib/chat-helpers"
@@ -167,5 +168,31 @@ describe("replaceHistoricalToolInputs", () => {
         ]
         const result = replaceHistoricalToolInputs(messages)
         expect(result[0].content[0].input).toEqual({ foo: "bar" })
+    })
+})
+
+describe("redactHistoricalToolResults", () => {
+    it("redacts imported asset data URLs from historical tool results", () => {
+        const messages = [
+            {
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool-result",
+                        toolName: "import_asset",
+                        output: {
+                            dataUrl: "data:image/png;base64,abc123",
+                            pageUrl: "https://bioicons.com/icons/cell",
+                        },
+                    },
+                ],
+            },
+        ]
+
+        const result = redactHistoricalToolResults(messages)
+        expect(result[0].content[0].output).toEqual({
+            dataUrl: "[data image omitted from history]",
+            pageUrl: "https://bioicons.com/icons/cell",
+        })
     })
 })

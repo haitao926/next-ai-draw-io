@@ -19,9 +19,15 @@ import {
     supportsImageInput,
     supportsPromptCaching,
 } from "@/lib/ai-providers"
+import {
+    getMaxImportsPerRequest,
+    importAsset,
+    searchAssets,
+} from "@/lib/asset-tools"
 import { findCachedResponse } from "@/lib/cached-responses"
 import {
     isMinimalDiagram,
+    redactHistoricalToolResults,
     replaceHistoricalToolInputs,
     validateFileParts,
 } from "@/lib/chat-helpers"
@@ -192,6 +198,7 @@ async function handleChatRequest(req: Request): Promise<Response> {
         apiKeyEnv?: string | string[]
         baseUrlEnv?: string
         provider?: string
+        modelId?: string
     } = {}
     if (selectedModelId?.startsWith("server:")) {
         const serverModel = await findServerModelById(selectedModelId)
@@ -204,6 +211,7 @@ async function handleChatRequest(req: Request): Promise<Response> {
                 baseUrlEnv: serverModel.baseUrlEnv,
                 // Use actual provider from config (client header may have incorrect value due to ID format change)
                 provider: serverModel.provider,
+                modelId: serverModel.modelId,
             }
         }
     }
@@ -213,7 +221,7 @@ async function handleChatRequest(req: Request): Promise<Response> {
         provider: serverModelConfig.provider || provider,
         baseUrl,
         apiKey: req.headers.get("x-ai-api-key"),
-        modelId: req.headers.get("x-ai-model"),
+        modelId: serverModelConfig.modelId || req.headers.get("x-ai-model"),
         account: req.headers.get("x-ai-account"),
         // AWS Bedrock credentials
         awsAccessKeyId: req.headers.get("x-aws-access-key-id"),
@@ -321,10 +329,11 @@ ${userInputText}
     const placeholderMessages = enableHistoryReplace
         ? replaceHistoricalToolInputs(modelMessages)
         : modelMessages
+    const redactedMessages = redactHistoricalToolResults(placeholderMessages)
 
     // Filter out messages with empty content arrays (Bedrock API rejects these)
     // This is a safety measure - ideally convertToModelMessages should handle all cases
-    let enhancedMessages = placeholderMessages.filter(
+    let enhancedMessages = redactedMessages.filter(
         (msg: any) =>
             msg.content && Array.isArray(msg.content) && msg.content.length > 0,
     )
@@ -483,6 +492,7 @@ IMPORTANT: The "Current diagram XML" is the SINGLE SOURCE OF TRUTH for what's on
           ]
 
     const allMessages = [...systemMessages, ...enhancedMessages]
+    const maxToolSteps = Math.max(5, getMaxImportsPerRequest() + 5)
 
     const result = streamText({
         model,
@@ -490,7 +500,7 @@ IMPORTANT: The "Current diagram XML" is the SINGLE SOURCE OF TRUTH for what's on
         ...(process.env.MAX_OUTPUT_TOKENS && {
             maxOutputTokens: parseInt(process.env.MAX_OUTPUT_TOKENS, 10),
         }),
-        stopWhen: stepCountIs(5),
+        stopWhen: stepCountIs(maxToolSteps),
         // Repair truncated tool calls when maxOutputTokens is reached mid-JSON
         experimental_repairToolCall: async ({ toolCall, error }) => {
             // DEBUG: Log what we're trying to repair
@@ -752,6 +762,115 @@ Call this tool to get shape names and usage syntax for a specific library.`,
                             error,
                         )
                         return `Error loading library "${library}". Please try again.`
+                    }
+                },
+            },
+            search_assets: {
+                description: `Search approved external asset sites for reusable SVG/PNG icons, illustrations, or templates. Only use when the user explicitly asks for external materials or downloads.`,
+                inputSchema: z.object({
+                    query: z
+                        .string()
+                        .min(1)
+                        .max(500)
+                        .describe("What kind of external asset to search for"),
+                    assetType: z
+                        .enum(["icon", "illustration", "template", "mixed"])
+                        .describe("Preferred asset category"),
+                    formats: z
+                        .array(z.enum(["svg", "png"]))
+                        .min(1)
+                        .max(2)
+                        .describe("Allowed downloadable formats"),
+                    maxResults: z
+                        .number()
+                        .int()
+                        .min(1)
+                        .max(8)
+                        .describe("Maximum number of search results to return"),
+                }),
+                execute: async ({ query, assetType, formats, maxResults }) => {
+                    try {
+                        const results = await searchAssets({
+                            query,
+                            assetType,
+                            formats,
+                            maxResults,
+                        })
+
+                        return {
+                            query,
+                            assetType,
+                            formats,
+                            maxResults: Math.min(maxResults, 8),
+                            maxAutoImports: getMaxImportsPerRequest(),
+                            results,
+                        }
+                    } catch (error) {
+                        return {
+                            query,
+                            assetType,
+                            formats,
+                            maxResults: Math.min(maxResults, 8),
+                            error:
+                                error instanceof Error
+                                    ? error.message
+                                    : "Asset search failed.",
+                        }
+                    }
+                },
+            },
+            import_asset: {
+                description: `Download, validate, sanitize, and convert a reusable SVG/PNG asset into a draw.io-ready data URL. Only use this after search_assets returns an importable result.`,
+                inputSchema: z.object({
+                    assetUrl: z
+                        .string()
+                        .url()
+                        .describe(
+                            "Direct SVG or PNG asset URL returned by search_assets",
+                        ),
+                    pageUrl: z
+                        .string()
+                        .url()
+                        .describe(
+                            "Original source page URL for license verification",
+                        ),
+                    label: z
+                        .string()
+                        .max(120)
+                        .optional()
+                        .describe("Short label to show under the image"),
+                    placementHint: z
+                        .string()
+                        .max(200)
+                        .optional()
+                        .describe(
+                            "Optional placement note for later diagram insertion",
+                        ),
+                }),
+                execute: async ({
+                    assetUrl,
+                    pageUrl,
+                    label,
+                    placementHint,
+                }) => {
+                    try {
+                        return await importAsset({
+                            assetUrl,
+                            pageUrl,
+                            label,
+                            placementHint,
+                        })
+                    } catch (error) {
+                        return {
+                            assetUrl,
+                            pageUrl,
+                            label,
+                            placementHint,
+                            error:
+                                error instanceof Error
+                                    ? error.message
+                                    : "Asset import failed.",
+                        }
                     }
                 },
             },

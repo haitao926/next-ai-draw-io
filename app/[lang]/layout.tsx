@@ -1,6 +1,5 @@
 import { GoogleAnalytics } from "@next/third-parties/google"
 import type { Metadata, Viewport } from "next"
-import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google"
 import { notFound } from "next/navigation"
 import { DiagramProvider } from "@/contexts/diagram-context"
 import { DictionaryProvider } from "@/hooks/use-dictionary"
@@ -9,18 +8,6 @@ import { i18n } from "@/lib/i18n/config"
 import { getDictionary, hasLocale } from "@/lib/i18n/dictionaries"
 
 import "../globals.css"
-
-const plusJakarta = Plus_Jakarta_Sans({
-    variable: "--font-sans",
-    subsets: ["latin"],
-    weight: ["400", "500", "600", "700"],
-})
-
-const jetbrainsMono = JetBrains_Mono({
-    variable: "--font-mono",
-    subsets: ["latin"],
-    weight: ["400", "500"],
-})
 
 export const viewport: Viewport = {
     width: "device-width",
@@ -175,6 +162,13 @@ export default async function RootLayout({
         },
     }
 
+    const bodyStyle = {
+        "--font-sans":
+            '"Plus Jakarta Sans", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif',
+        "--font-mono":
+            '"JetBrains Mono", "SFMono-Regular", "Cascadia Code", "Fira Code", "Noto Sans Mono CJK SC", Consolas, monospace',
+    } as React.CSSProperties
+
     return (
         <html lang={validLang} suppressHydrationWarning>
             <head>
@@ -183,9 +177,7 @@ export default async function RootLayout({
                     dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
                 />
             </head>
-            <body
-                className={`${plusJakarta.variable} ${jetbrainsMono.variable} antialiased`}
-            >
+            <body className="antialiased" style={bodyStyle}>
                 <DictionaryProvider dictionary={dictionary}>
                     <DiagramProvider>{children}</DiagramProvider>
                 </DictionaryProvider>

@@ -1,18 +1,19 @@
 {
     "providers": [
         {
+            "name": "VectorEngine Gemini",
+            "provider": "openai",
+            "models": ["gemini-3.1-flash-lite-preview"],
+            "apiKeyEnv": "GEMINI_API_KEY",
+            "baseUrlEnv": "GOOGLE_GEMINI_BASE_URL",
+            "default": true
+        },
+        {
             "name": "PackyCode",
             "provider": "openai",
             "models": ["kimi-k2.5"],
             "apiKeyEnv": "PACKYCODE_API_KEY",
             "baseUrlEnv": "PACKYCODE_BASE_URL"
-        },
-        {
-            "name": "VectorEngine",
-            "provider": "openai",
-            "models": ["gpt-5.4", "gpt-5.3-codex-high"],
-            "apiKeyEnv": "VECTORENGINE_API_KEY",
-            "baseUrlEnv": "VECTORENGINE_BASE_URL"
         }
     ]
 }

@@ -12,5 +12,5 @@ export interface ToolPartLike {
         xml?: string
         operations?: DiagramOperation[]
     } & Record<string, unknown>
-    output?: string
+    output?: unknown
 }

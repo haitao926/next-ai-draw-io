@@ -1078,8 +1078,16 @@ export function supportsImageInput(modelId: string): boolean {
     const hasVisionIndicator =
         lowerModelId.includes("vision") || lowerModelId.includes("vl")
 
+    // Kimi K2.5 is multimodal; older K2 text variants are not.
+    if (
+        (lowerModelId.includes("kimi-k2.5") ||
+            lowerModelId.includes("moonshotai/kimi-k2.5")) &&
+        !hasVisionIndicator
+    ) {
+        return true
+    }
+
     // Models that DON'T support image/vision input (unless vision variant)
-    // Kimi K2 models don't support images
     if (lowerModelId.includes("kimi") && !hasVisionIndicator) {
         return false
     }

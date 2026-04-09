@@ -87,3 +87,53 @@ export function replaceHistoricalToolInputs(messages: any[]): any[] {
         return { ...msg, content: replacedContent }
     })
 }
+
+function redactDataUrls(value: unknown): unknown {
+    if (typeof value === "string") {
+        return value.startsWith("data:image/")
+            ? "[data image omitted from history]"
+            : value
+    }
+
+    if (Array.isArray(value)) {
+        return value.map((item) => redactDataUrls(item))
+    }
+
+    if (value && typeof value === "object") {
+        return Object.fromEntries(
+            Object.entries(value).map(([key, nestedValue]) => [
+                key,
+                key === "dataUrl"
+                    ? "[data image omitted from history]"
+                    : redactDataUrls(nestedValue),
+            ]),
+        )
+    }
+
+    return value
+}
+
+export function redactHistoricalToolResults(messages: any[]): any[] {
+    return messages.map((msg) => {
+        if (!Array.isArray(msg.content)) {
+            return msg
+        }
+
+        const content = msg.content.map((part: any) => {
+            if (
+                part.type === "tool-result" &&
+                part.toolName === "import_asset" &&
+                part.output
+            ) {
+                return {
+                    ...part,
+                    output: redactDataUrls(part.output),
+                }
+            }
+
+            return part
+        })
+
+        return { ...msg, content }
+    })
+}
