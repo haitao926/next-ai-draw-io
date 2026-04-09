@@ -8,14 +8,14 @@ import {
 } from "./lib/fixtures"
 
 test.describe("Language Switching", () => {
-    test("loads English by default", async ({ page }) => {
+    test("loads Chinese by default", async ({ page }) => {
         await page.goto("/", { waitUntil: "networkidle" })
         await getIframe(page).waitFor({ state: "visible", timeout: 30000 })
 
         const chatInput = getChatInput(page)
         await expect(chatInput).toBeVisible({ timeout: 10000 })
 
-        await expect(page.locator('button:has-text("Send")')).toBeVisible()
+        await expect(page.locator('button:has-text("发送")')).toBeVisible()
     })
 
     test("can switch to Japanese", async ({ page }) => {
