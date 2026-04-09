@@ -49,6 +49,8 @@ interface SearchProviderResult {
     content?: string
 }
 
+type SearchProvider = "searxng" | "tavily" | "brave" | "bing"
+
 interface SupportedAssetSite {
     label: string
     domains: string[]
@@ -65,6 +67,7 @@ const DEFAULT_PNG_MAX_BYTES = 512000
 const MAX_SEARCH_CANDIDATES = 16
 const MAX_IMPORTS_PER_REQUEST = 5
 const FALLBACK_IMAGE_SIZE = 128
+const DEFAULT_SEARCH_FALLBACK_PROVIDERS: SearchProvider[] = ["bing"]
 
 const SUPPORTED_SITES: SupportedAssetSite[] = [
     { label: "Bioicons", domains: ["bioicons.com"] },
@@ -230,11 +233,53 @@ function buildSearchQuery({
                 : "icon illustration template"
 
     const formatHints = formats.join(" ")
+    const siteHints = SUPPORTED_SITES.flatMap((site) =>
+        site.domains.map((domain) => `site:${domain}`),
+    ).join(" OR ")
 
-    return `${query} ${typeHints} ${formatHints} free reusable scientific asset`
+    return `${query} ${typeHints} ${formatHints} free reusable scientific asset (${siteHints})`
 }
 
-function getSearchEndpoint(provider: string, baseUrl?: string): string {
+function normalizeSearchProvider(value: string): SearchProvider | null {
+    const provider = value.trim().toLowerCase()
+    if (
+        provider === "searxng" ||
+        provider === "tavily" ||
+        provider === "brave" ||
+        provider === "bing"
+    ) {
+        return provider
+    }
+
+    return null
+}
+
+function splitEnvList(value?: string): string[] {
+    return (value || "")
+        .split(/[,\s]+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+}
+
+function getConfiguredSearchProviders(): SearchProvider[] {
+    const configuredProviders = splitEnvList(
+        process.env.ASSET_SEARCH_PROVIDERS || process.env.ASSET_SEARCH_PROVIDER,
+    )
+        .map((provider) => normalizeSearchProvider(provider))
+        .filter((provider): provider is SearchProvider => !!provider)
+
+    if (configuredProviders.length === 0) {
+        throw new Error(
+            "Asset search is not configured. Set ASSET_SEARCH_PROVIDER and the matching search endpoint settings.",
+        )
+    }
+
+    return Array.from(
+        new Set([...configuredProviders, ...DEFAULT_SEARCH_FALLBACK_PROVIDERS]),
+    )
+}
+
+function getSearchEndpoint(provider: SearchProvider, baseUrl?: string): string {
     const normalizedProvider = provider.toLowerCase()
     const trimmedBaseUrl = baseUrl?.trim()
 
@@ -264,9 +309,29 @@ function getSearchEndpoint(provider: string, baseUrl?: string): string {
         )
     }
 
+    if (normalizedProvider === "bing") {
+        return (
+            trimmedBaseUrl?.replace(/\/$/, "") || "https://www.bing.com/search"
+        )
+    }
+
     throw new Error(
-        `Unsupported asset search provider "${provider}". Use "searxng", "tavily", or "brave".`,
+        `Unsupported asset search provider "${provider}". Use "searxng", "tavily", "brave", or "bing".`,
     )
+}
+
+function getProviderBaseUrl(provider: SearchProvider): string | undefined {
+    const providerSpecificKey = `ASSET_SEARCH_${provider.toUpperCase()}_BASE_URL`
+    const providerSpecificBaseUrl = process.env[providerSpecificKey]
+    if (providerSpecificBaseUrl) return providerSpecificBaseUrl
+
+    const legacyProviders = splitEnvList(process.env.ASSET_SEARCH_PROVIDER)
+        .map((value) => normalizeSearchProvider(value))
+        .filter((value): value is SearchProvider => !!value)
+
+    return legacyProviders.length === 1 && legacyProviders[0] === provider
+        ? process.env.ASSET_SEARCH_BASE_URL
+        : undefined
 }
 
 function assertPublicUrl(urlString: string, label: string) {
@@ -295,21 +360,87 @@ async function fetchWithTimeout(
     }
 }
 
-async function searchWithProvider(
-    query: string,
-    maxResults: number,
-): Promise<SearchProviderResult[]> {
-    const provider = process.env.ASSET_SEARCH_PROVIDER?.trim().toLowerCase()
-    if (!provider) {
-        throw new Error(
-            "Asset search is not configured. Set ASSET_SEARCH_PROVIDER and the matching search endpoint settings.",
+function decodeHtmlEntities(value: string): string {
+    return value
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#x([0-9a-f]+);/gi, (_, hex) =>
+            String.fromCodePoint(Number.parseInt(hex, 16)),
         )
+        .replace(/&#(\d+);/g, (_, decimal) =>
+            String.fromCodePoint(Number.parseInt(decimal, 10)),
+        )
+}
+
+function normalizeBingResultUrl(rawUrl: string): string | null {
+    const decoded = decodeHtmlEntities(rawUrl)
+    const resolved = resolveUrl(decoded, "https://www.bing.com")
+    if (!resolved) return null
+
+    try {
+        const url = new URL(resolved)
+        const encodedTarget = url.searchParams.get("u")
+        if (url.hostname.endsWith("bing.com") && encodedTarget) {
+            const maybeBase64 = encodedTarget.replace(/^a1/, "")
+            try {
+                const decodedTarget = Buffer.from(maybeBase64, "base64url")
+                    .toString("utf-8")
+                    .trim()
+                if (decodedTarget.startsWith("http")) {
+                    return decodedTarget
+                }
+            } catch {
+                // Fall through and keep the original URL.
+            }
+        }
+
+        return url.toString()
+    } catch {
+        return null
+    }
+}
+
+function parseBingResults(html: string): SearchProviderResult[] {
+    const results: SearchProviderResult[] = []
+    const seenUrls = new Set<string>()
+    const itemPattern =
+        /<li[^>]+class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi
+
+    let itemMatch: RegExpExecArray | null
+    while ((itemMatch = itemPattern.exec(html)) !== null) {
+        const itemHtml = itemMatch[1] || ""
+        const linkMatch = itemHtml.match(
+            /<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i,
+        )
+        if (!linkMatch) continue
+
+        const url = normalizeBingResultUrl(linkMatch[1])
+        if (!url || seenUrls.has(url)) continue
+
+        const snippetMatch = itemHtml.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
+        seenUrls.add(url)
+        results.push({
+            title: htmlToText(decodeHtmlEntities(linkMatch[2])) || "Untitled",
+            url,
+            content: snippetMatch
+                ? htmlToText(decodeHtmlEntities(snippetMatch[1]))
+                : "",
+        })
     }
 
-    const endpoint = getSearchEndpoint(
-        provider,
-        process.env.ASSET_SEARCH_BASE_URL,
-    )
+    return results.slice(0, MAX_SEARCH_CANDIDATES)
+}
+
+async function searchWithSingleProvider(
+    query: string,
+    maxResults: number,
+    provider: SearchProvider,
+): Promise<SearchProviderResult[]> {
+    const endpoint = getSearchEndpoint(provider, getProviderBaseUrl(provider))
 
     if (provider === "searxng") {
         const url = new URL(endpoint)
@@ -402,6 +533,32 @@ async function searchWithProvider(
             }))
     }
 
+    if (provider === "bing") {
+        const url = new URL(endpoint)
+        url.searchParams.set("q", query)
+        url.searchParams.set("setlang", "zh-cn")
+
+        const response = await fetchWithTimeout(
+            url.toString(),
+            {
+                headers: {
+                    Accept: "text/html,application/xhtml+xml",
+                    "User-Agent": SEARCH_USER_AGENT,
+                },
+            },
+            SEARCH_TIMEOUT_MS,
+        )
+
+        if (!response.ok) {
+            throw new Error(
+                `Asset search failed (HTTP ${response.status}) via Bing fallback.`,
+            )
+        }
+
+        const html = await response.text()
+        return parseBingResults(html)
+    }
+
     const apiKey = process.env.ASSET_SEARCH_API_KEY?.trim()
     if (!apiKey) {
         throw new Error(
@@ -448,6 +605,40 @@ async function searchWithProvider(
             url: result.url || "",
             content: result.content || "",
         }))
+}
+
+async function searchWithProvider(
+    query: string,
+    maxResults: number,
+): Promise<SearchProviderResult[]> {
+    const providers = getConfiguredSearchProviders()
+    const failures: string[] = []
+
+    for (const provider of providers) {
+        try {
+            const results = await searchWithSingleProvider(
+                query,
+                maxResults,
+                provider,
+            )
+
+            if (results.length > 0) {
+                return results
+            }
+
+            failures.push(`${provider}: no results`)
+        } catch (error) {
+            failures.push(
+                `${provider}: ${
+                    error instanceof Error ? error.message : "search failed"
+                }`,
+            )
+        }
+    }
+
+    throw new Error(
+        `Asset search failed after trying ${providers.join(", ")}. ${failures.join("; ")}`,
+    )
 }
 
 function resolveUrl(candidate: string, pageUrl: string): string | null {

@@ -19,6 +19,7 @@ afterEach(() => {
 describe("searchAssets", () => {
     it("fails clearly when the search provider is not configured", async () => {
         delete process.env.ASSET_SEARCH_PROVIDER
+        delete process.env.ASSET_SEARCH_PROVIDERS
         delete process.env.ASSET_SEARCH_BASE_URL
 
         await expect(
@@ -29,6 +30,70 @@ describe("searchAssets", () => {
                 maxResults: 3,
             }),
         ).rejects.toThrow("Asset search is not configured")
+    })
+
+    it("falls back to Bing when the configured provider cannot be reached", async () => {
+        process.env.ASSET_SEARCH_PROVIDER = "brave"
+        process.env.ASSET_SEARCH_API_KEY = "brave-key"
+
+        global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+            const url =
+                typeof input === "string"
+                    ? input
+                    : input instanceof URL
+                      ? input.toString()
+                      : input.url
+
+            if (url.startsWith("https://api.search.brave.com/")) {
+                throw new TypeError("fetch failed")
+            }
+
+            if (url.startsWith("https://www.bing.com/search")) {
+                return new Response(
+                    `
+                    <html><body>
+                      <li class="b_algo">
+                        <h2><a href="https://bioicons.com/icons/cell">Cell Icon</a></h2>
+                        <p>Free to use SVG biology icon.</p>
+                      </li>
+                    </body></html>
+                    `,
+                    {
+                        status: 200,
+                        headers: { "content-type": "text/html" },
+                    },
+                )
+            }
+
+            if (url === "https://bioicons.com/icons/cell") {
+                return new Response(
+                    `<html><title>Cell Icon</title><body>Free to use <a href="/assets/cell.svg">SVG</a></body></html>`,
+                    {
+                        status: 200,
+                        headers: { "content-type": "text/html" },
+                    },
+                )
+            }
+
+            return new Response("not found", { status: 404 })
+        }) as typeof fetch
+
+        const results = await searchAssets({
+            query: "cell icon",
+            assetType: "icon",
+            formats: ["svg"],
+            maxResults: 3,
+        })
+
+        expect(results[0]).toMatchObject({
+            title: "Cell Icon",
+            source: "Bioicons",
+            pageUrl: "https://bioicons.com/icons/cell",
+            assetUrl: "https://bioicons.com/assets/cell.svg",
+            format: "svg",
+            license: "Free to Use",
+            importable: true,
+        })
     })
 })
 
