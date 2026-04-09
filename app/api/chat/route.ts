@@ -350,6 +350,141 @@ function createDirectAssetResponse(params: {
     return createUIMessageStreamResponse({ stream })
 }
 
+function extractDiagramXmlFromText(text: string): {
+    planText: string
+    xml: string
+} | null {
+    const firstCellIndex = text.indexOf("<mxCell")
+    const lastCellEndIndex = text.lastIndexOf("</mxCell>")
+    if (firstCellIndex < 0 || lastCellEndIndex < firstCellIndex) {
+        return null
+    }
+
+    const xml = text
+        .slice(firstCellIndex, lastCellEndIndex + "</mxCell>".length)
+        .trim()
+    if (!xml.includes("<mxGeometry")) return null
+
+    const planText = text
+        .slice(0, firstCellIndex)
+        .replace(/```(?:xml)?/gi, "")
+        .replace(/---+\s*$/g, "")
+        .trim()
+
+    return {
+        planText,
+        xml,
+    }
+}
+
+function normalizeRawXmlTextChunks(chunks: any[]): any[] {
+    const hasDiagramTool = chunks.some(
+        (chunk) =>
+            typeof chunk.type === "string" &&
+            chunk.type.includes("display_diagram"),
+    )
+    if (hasDiagramTool) return chunks
+
+    const textChunks = chunks.filter((chunk) => chunk.type === "text-delta")
+    const text = textChunks.map((chunk) => chunk.delta || "").join("")
+    const extracted = extractDiagramXmlFromText(text)
+    if (!extracted) return chunks
+
+    const textStart = chunks.find((chunk) => chunk.type === "text-start")
+    const finishStepIndex = chunks.findIndex(
+        (chunk) => chunk.type === "finish-step",
+    )
+    const insertIndex = finishStepIndex >= 0 ? finishStepIndex : chunks.length
+    const toolCallId = `raw-xml-fallback-${Date.now()}`
+    const transformed: any[] = []
+    let insertedTool = false
+
+    for (let index = 0; index < chunks.length; index++) {
+        const chunk = chunks[index]
+
+        if (
+            chunk.type === "text-start" ||
+            chunk.type === "text-delta" ||
+            chunk.type === "text-end"
+        ) {
+            continue
+        }
+
+        if (!insertedTool && index >= insertIndex) {
+            if (extracted.planText) {
+                transformed.push({
+                    type: "text-start",
+                    id: textStart?.id || "0",
+                })
+                transformed.push({
+                    type: "text-delta",
+                    id: textStart?.id || "0",
+                    delta: extracted.planText,
+                })
+                transformed.push({
+                    type: "text-end",
+                    id: textStart?.id || "0",
+                })
+            }
+            transformed.push({
+                type: "tool-input-start",
+                toolCallId,
+                toolName: "display_diagram",
+            })
+            transformed.push({
+                type: "tool-input-delta",
+                toolCallId,
+                inputTextDelta: extracted.xml,
+            })
+            transformed.push({
+                type: "tool-input-available",
+                toolCallId,
+                toolName: "display_diagram",
+                input: { xml: extracted.xml },
+            })
+            insertedTool = true
+        }
+
+        transformed.push(chunk)
+    }
+
+    if (!insertedTool) {
+        if (extracted.planText) {
+            transformed.push({
+                type: "text-start",
+                id: textStart?.id || "0",
+            })
+            transformed.push({
+                type: "text-delta",
+                id: textStart?.id || "0",
+                delta: extracted.planText,
+            })
+            transformed.push({
+                type: "text-end",
+                id: textStart?.id || "0",
+            })
+        }
+        transformed.push({
+            type: "tool-input-start",
+            toolCallId,
+            toolName: "display_diagram",
+        })
+        transformed.push({
+            type: "tool-input-delta",
+            toolCallId,
+            inputTextDelta: extracted.xml,
+        })
+        transformed.push({
+            type: "tool-input-available",
+            toolCallId,
+            toolName: "display_diagram",
+            input: { xml: extracted.xml },
+        })
+    }
+
+    return transformed
+}
+
 async function maybeHandleGeminiAssetRequest(params: {
     modelId: string
     userInputText: string
@@ -1327,6 +1462,7 @@ Call this tool to get shape names and usage syntax for a specific library.`,
             }
             chunks.push(chunk)
         }
+        const normalizedChunks = normalizeRawXmlTextChunks(chunks)
 
         return createUIMessageStreamResponse({
             headers: createAttemptHeaders({
@@ -1337,7 +1473,7 @@ Call this tool to get shape names and usage syntax for a specific library.`,
             }),
             stream: createUIMessageStream({
                 execute: ({ writer }) => {
-                    for (const chunk of chunks) {
+                    for (const chunk of normalizedChunks) {
                         writer.write(chunk)
                     }
                 },
