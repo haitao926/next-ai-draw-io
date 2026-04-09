@@ -104,6 +104,22 @@ function inferAssetFormats(text: string): Array<"svg" | "png"> {
     return ["svg", "png"]
 }
 
+function extractAssetSearchQuery(text: string): string {
+    const cleaned = text
+        .replace(
+            /\b(?:please|search|find|download|import|insert|add|external|reusable|asset|assets|site|sites|for|and|into|canvas|available|result|results)\b/gi,
+            " ",
+        )
+        .replace(
+            /(?:请|帮我|搜索|查找|下载|导入|插入|添加|外部|素材网站|网站|可复用|免费的?|可用结果|结果|画布|并把|把)/g,
+            " ",
+        )
+        .replace(/\s+/g, " ")
+        .trim()
+
+    return cleaned.length > 0 ? cleaned.slice(0, 500) : text.slice(0, 500)
+}
+
 function escapeXml(value: string): string {
     return value
         .replace(/&/g, "&amp;")
@@ -354,7 +370,7 @@ async function maybeHandleGeminiAssetRequest(params: {
 
     try {
         searchResults = await searchAssets({
-            query: params.userInputText.slice(0, 500),
+            query: extractAssetSearchQuery(params.userInputText),
             assetType: inferAssetType(params.userInputText),
             formats: inferAssetFormats(params.userInputText),
             maxResults: maxImports,

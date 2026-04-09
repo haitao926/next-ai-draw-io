@@ -421,6 +421,11 @@ function parseBingResults(html: string): SearchProviderResult[] {
         const url = normalizeBingResultUrl(linkMatch[1])
         if (!url || seenUrls.has(url)) continue
 
+        const hostname = new URL(url).hostname.toLowerCase()
+        if (hostname === "bing.com" || hostname.endsWith(".bing.com")) {
+            continue
+        }
+
         const snippetMatch = itemHtml.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
         seenUrls.add(url)
         results.push({
