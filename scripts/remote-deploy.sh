@@ -44,8 +44,18 @@ ensure_env() {
 }
 
 install_build() {
-  info "📦 安装依赖 (npm install --omit=dev)..."
-  npm install --omit=dev
+  export CI=1
+  export HUSKY=0
+
+  info "📦 安装依赖 (优先 npm install，失败时回退到 pnpm install --ignore-scripts)..."
+  if npm install; then
+    success "✅ npm install 完成"
+  else
+    warn "⚠️  npm install 失败，尝试使用 pnpm 回退安装..."
+    npx -y pnpm@10.8.1 install --ignore-scripts
+    success "✅ pnpm install 完成"
+  fi
+
   info "🏗️  构建应用 (npm run build)..."
   npm run build
 }
