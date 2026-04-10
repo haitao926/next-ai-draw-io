@@ -47,6 +47,7 @@ import {
 } from "@/lib/langfuse"
 import {
     buildModelFailoverHeaders,
+    sanitizeModelErrorMessage,
     shouldFailoverToNextModel,
 } from "@/lib/model-failover"
 import {
@@ -1592,22 +1593,9 @@ function handleError(error: unknown): Response {
         error instanceof Error ? error.message : "An unexpected error occurred"
     const status = (error as any)?.statusCode || (error as any)?.status || 500
 
-    // Prevent leaking API keys, tokens, or other sensitive data
-    const lowerMessage = message.toLowerCase()
-    const safeMessage =
-        lowerMessage.includes("key") ||
-        lowerMessage.includes("token") ||
-        lowerMessage.includes("sig") ||
-        lowerMessage.includes("signature") ||
-        lowerMessage.includes("secret") ||
-        lowerMessage.includes("password") ||
-        lowerMessage.includes("credential")
-            ? "Authentication failed. Please check your credentials."
-            : message
-
     return Response.json(
         {
-            error: safeMessage,
+            error: sanitizeModelErrorMessage(error),
             ...(isDev && {
                 details: message,
                 stack: error instanceof Error ? error.stack : undefined,

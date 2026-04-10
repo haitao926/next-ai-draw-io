@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
     buildModelFailoverHeaders,
+    sanitizeModelErrorMessage,
     shouldFailoverToNextModel,
 } from "@/lib/model-failover"
 
@@ -56,6 +57,16 @@ describe("shouldFailoverToNextModel", () => {
             ),
         ).toBe(true)
     })
+
+    it("treats upstream provider request failures as retryable", () => {
+        expect(
+            shouldFailoverToNextModel(
+                new Error(
+                    "Failed after 3 attempts. Last error: upstream error: do request failed (request id: 20260410095442975315514T59qCF8k)",
+                ),
+            ),
+        ).toBe(true)
+    })
 })
 
 describe("buildModelFailoverHeaders", () => {
@@ -76,6 +87,28 @@ describe("buildModelFailoverHeaders", () => {
         expect(headers.get("x-ai-actual-provider")).toBe("openai")
         expect(headers.get("x-ai-actual-selected-model-id")).toBe(
             "server:packycode:kimi-k2.5",
+        )
+    })
+})
+
+describe("sanitizeModelErrorMessage", () => {
+    it("masks authentication-style provider errors", () => {
+        expect(
+            sanitizeModelErrorMessage(
+                new Error("无效的令牌 (request id: test)"),
+            ),
+        ).toBe("Authentication failed. Please check your credentials.")
+    })
+
+    it("rewrites upstream request failures into a stable message", () => {
+        expect(
+            sanitizeModelErrorMessage(
+                new Error(
+                    "Failed after 3 attempts. Last error: upstream error: do request failed (request id: 20260410095442975315514T59qCF8k)",
+                ),
+            ),
+        ).toBe(
+            "The upstream AI provider request failed. Please retry or switch models. Request ID: 20260410095442975315514T59qCF8k.",
         )
     })
 })
