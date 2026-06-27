@@ -438,24 +438,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
             },
         ] as const
 
-        const resultSummary =
-            workflowMode === "convert"
-                ? imageFileCount > 0
-                    ? dict.chat.convertNextStepReady
-                    : dict.chat.resultWaitingConvert
-                : hasDiagram
-                  ? workflowMode === "edit"
-                      ? dict.chat.resultEditableReady
-                      : dict.chat.resultEditableLoaded
-                  : dict.chat.resultWaitingStart
-        const workspaceFacts = [
-            hasDiagram ? "已有画布" : "空白画布",
-            imageFileCount > 0 ? `${imageFileCount} 张图片` : "未上传图片",
-            docFileCount + urlCount > 0
-                ? `${docFileCount + urlCount} 份资料`
-                : "无补充资料",
-        ]
-
         const adjustTextareaHeight = useCallback(() => {
             const textarea = textareaRef.current
             if (textarea) {
@@ -657,22 +639,19 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
             {
                 mode: "generate" as const,
                 label: dict.chat.generateMode,
-                hint:
-                    generateOutputMode === "image"
-                        ? dict.chat.generateImageShortHint
-                        : dict.chat.generateDiagramShortHint,
+                hint: "",
                 available: true,
             },
             {
                 mode: "convert" as const,
                 label: dict.chat.convertMode,
-                hint: imageFileCount > 0 ? "素材已就绪" : "上传并转图",
+                hint: "",
                 available: true,
             },
             {
                 mode: "edit" as const,
                 label: dict.chat.editMode,
-                hint: hasDiagram ? "在画布上调整" : "等待画布",
+                hint: "",
                 available: hasDiagram,
             },
         ]
@@ -690,38 +669,19 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
         const workspaceStageMeta: Record<
             WorkflowMode,
             {
-                eyebrow: string
-                kicker: string
                 surfaceTone: string
                 ringTone: string
             }
         > = {
             generate: {
-                eyebrow: "生成新图",
-                kicker: hasDiagram
-                    ? generateOutputMode === "image"
-                        ? "保留当前画布，同时在这里直接生成新图片。"
-                        : "保留当前画布，继续生成新的结构方案。"
-                    : generateOutputMode === "image"
-                      ? "从一句描述开始，直接生成一张新图片。"
-                      : "从一句描述开始，直接生成第一版图。",
                 surfaceTone: "from-amber-100/70 via-background to-background",
                 ringTone: "from-amber-300/45 via-transparent to-transparent",
             },
             convert: {
-                eyebrow: "转成可编辑图",
-                kicker:
-                    imageFileCount > 0
-                        ? "图片已经就位，下一步就是识别并还原结构。"
-                        : "上传截图、海报、论文图或白板照，再开始转图。",
                 surfaceTone: "from-sky-100/70 via-background to-background",
                 ringTone: "from-sky-300/45 via-transparent to-transparent",
             },
             edit: {
-                eyebrow: "在画布上调整",
-                kicker: hasDiagram
-                    ? "直接说要改哪里，结果会继续更新到当前画布。"
-                    : "先生成或转图，再进入调整阶段。",
                 surfaceTone: "from-emerald-100/70 via-background to-background",
                 ringTone: "from-emerald-300/45 via-transparent to-transparent",
             },
@@ -729,18 +689,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
         const activeStageMeta = workspaceStageMeta[workflowMode]
         const showHistoryAction = diagramHistory.length > 0
         const showSaveAction = isRealDiagram(chartXML)
-        const unifiedWorkspaceTitle =
-            workflowMode === "generate"
-                ? generateOutputMode === "image"
-                    ? "直接描述你要生成什么图片"
-                    : "直接描述你要生成什么图表"
-                : workflowMode === "convert"
-                  ? imageFileCount > 0
-                      ? "告诉系统如何还原"
-                      : "先放入要转成可编辑图的原图"
-                  : hasDiagram
-                    ? "直接说要改哪里"
-                    : "当前还没有可继续修的画布"
         const showEditReadyState =
             workflowMode === "edit" && hasDiagram && !workspaceConversation
         const showConvertEmptyState =
@@ -754,39 +702,22 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                   ? "min-h-[96px] max-h-[144px]"
                   : "min-h-[152px] max-h-[220px]"
         const showUnifiedSaveAction = workflowMode === "edit" && showSaveAction
-        const showWorkspaceStageStrip = isReconstructing || isGeneratingImage
         const workspaceEmptyHeadline =
             workflowMode === "generate"
                 ? hasDiagram
                     ? generateOutputMode === "image"
-                        ? "保留当前画布，在这里继续生成新的图片。"
-                        : "保留当前画布，在这里继续发起新的图表生成。"
+                        ? "继续生成图片"
+                        : "继续生成图表"
                     : generateOutputMode === "image"
-                      ? "从一句描述开始，在这里直接生成第一张图。"
-                      : "从一句描述开始，在这里直接拉起第一版图。"
+                      ? "生成第一张图"
+                      : "生成第一版图表"
                 : workflowMode === "edit"
                   ? hasDiagram
-                      ? "直接告诉系统要改哪里，结果会继续落在当前画布上。"
-                      : "当前还没有可继续调整的画布。"
+                      ? "继续调整当前画布"
+                      : "还没有可调整的画布"
                   : imageFileCount > 0
-                    ? "素材已就绪，补一句还原要求后就可以开始转图。"
-                    : "把原图放进来，这里会直接变成转图工作台。"
-        const workspaceEmptyDescription =
-            workflowMode === "generate"
-                ? hasDiagram
-                    ? generateOutputMode === "image"
-                        ? "图片结果会直接留在这一块工作台里；如果你要继续结构化编辑，再切回图表模式即可。"
-                        : "新结果、后续调整和导出都会继续留在这一块工作台里，不会跳出去。"
-                    : generateOutputMode === "image"
-                      ? "图片生成结果会直接显示在这块工作台里，不需要跳转到别处。"
-                      : "生成结果、后续修改和导出都会停留在这一块里完成。"
-                : workflowMode === "edit"
-                  ? hasDiagram
-                      ? "你可以直接要求整理布局、统一风格、补连接或改文案，调整过程会沿着当前画布继续推进。"
-                      : "先生成一版，或者先把现有图片转成可编辑图，再回来继续调整。"
-                  : imageFileCount > 0
-                    ? "转图完成后不会跳出去，结果会直接留在这块工作台里继续调整。"
-                    : "上传成功后，识别过程、结果和后续调整都会继续停留在这里。"
+                    ? "开始转图"
+                    : "上传原图"
         const showConvertReadyState =
             workflowMode === "convert" &&
             imageFileCount > 0 &&
@@ -804,29 +735,13 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                   ? "border-sky-200 bg-background text-sky-700"
                   : "border-emerald-200 bg-background text-emerald-700"
         const workspaceGuideTitle = showConvertReadyState
-            ? "素材已就绪，下一步直接开始转图。"
+            ? "开始转图"
             : showEditReadyState
-              ? "当前画布已就绪。"
+              ? "调整当前画布"
               : showConvertWithDiagramState
-                ? "保留当前画布，同时把新图片接入这条工作流。"
+                ? "把新图片接入当前画布"
                 : workspaceEmptyHeadline
-        const workspaceGuideDescription = showConvertReadyState
-            ? "补一句还原要求，例如保留版式、优先合并碎文字、尽量保持原结构。完成后结果会直接留在这里继续调整。"
-            : showEditReadyState
-              ? ""
-              : showConvertWithDiagramState
-                ? "新的图片会先走转图流程，完成后仍然停留在当前工作台里，再继续调整和导出。"
-                : workspaceEmptyDescription
         const showGenerateOutputSwitcher = workflowMode === "generate"
-        const workspaceStatusSummary =
-            workflowMode === "edit"
-                ? "调整结果会直接更新到当前画布"
-                : "结果会直接放到当前画布"
-        const workspaceSecondaryNote = showGenerateOutputSwitcher
-            ? "无论生成图片还是图表，结果都会直接放到当前画布。"
-            : workflowMode === "convert"
-              ? "转图完成后会直接回到当前画布，随后可以继续调整。"
-              : "所有后续调整都会直接更新在当前画布上。"
         const workspaceComposer = (
             <div className="relative h-full overflow-hidden rounded-[32px] border border-slate-200/70 bg-[linear-gradient(180deg,rgba(255,252,244,0.96),rgba(255,255,255,0.94))] shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
                 <div
@@ -846,17 +761,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                 <div className="relative flex h-full min-h-0 flex-col">
                     <div className="border-b border-slate-200/55 px-5 py-5">
                         <div className="flex flex-col gap-4">
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div className="flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                                    <span className="rounded-full border border-white/80 bg-white/70 px-2.5 py-1 font-semibold tracking-[0.16em] text-slate-700 shadow-sm">
-                                        {activeStageMeta.eyebrow}
-                                    </span>
-                                </div>
-                                <p className="text-xs text-slate-500">
-                                    {workspaceStatusSummary}
-                                </p>
-                            </div>
-
                             <div className="grid grid-cols-1 gap-2 rounded-[24px] border border-white/80 bg-white/58 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] min-[520px]:grid-cols-3">
                                 {workspaceFlow.map((item, index) => {
                                     const phaseState = workspaceFlowState(
@@ -906,16 +810,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                                                     <p className="text-[13px] font-semibold">
                                                         {item.label}
                                                     </p>
-                                                    <p
-                                                        className={cn(
-                                                            "mt-0.5 text-[11px]",
-                                                            isActive
-                                                                ? "text-white/70"
-                                                                : "text-slate-500",
-                                                        )}
-                                                    >
-                                                        {item.hint}
-                                                    </p>
                                                 </div>
                                             </div>
                                         </button>
@@ -923,89 +817,44 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                                 })}
                             </div>
 
-                            <div className="rounded-[24px] border border-white/80 bg-white/64 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]">
-                                <div className="flex flex-col gap-3">
-                                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                                        <div className="min-w-0 flex-1">
-                                            <p className="text-[18px] font-semibold text-slate-950">
-                                                {unifiedWorkspaceTitle}
-                                            </p>
-                                            <p className="mt-1 text-sm leading-6 text-slate-600">
-                                                {activeStageMeta.kicker}
-                                            </p>
-                                        </div>
-                                        <div className="flex flex-col gap-2 lg:items-end">
-                                            {showGenerateOutputSwitcher ? (
-                                                <>
-                                                    <span className="text-[11px] font-medium tracking-[0.14em] text-slate-500">
-                                                        生成内容
-                                                    </span>
-                                                    <div className="inline-flex rounded-full border border-white/90 bg-white/78 p-1 shadow-sm">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                onGenerateOutputModeChange(
-                                                                    "image",
-                                                                )
-                                                            }
-                                                            className={cn(
-                                                                "rounded-full px-3 py-1.5 text-[12px] font-medium transition-all",
-                                                                generateOutputMode ===
-                                                                    "image"
-                                                                    ? "bg-slate-900 text-white"
-                                                                    : "text-slate-600 hover:text-slate-900",
-                                                            )}
-                                                        >
-                                                            {
-                                                                dict.chat
-                                                                    .generateOutputImage
-                                                            }
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                onGenerateOutputModeChange(
-                                                                    "diagram",
-                                                                )
-                                                            }
-                                                            className={cn(
-                                                                "rounded-full px-3 py-1.5 text-[12px] font-medium transition-all",
-                                                                generateOutputMode ===
-                                                                    "diagram"
-                                                                    ? "bg-slate-900 text-white"
-                                                                    : "text-slate-600 hover:text-slate-900",
-                                                            )}
-                                                        >
-                                                            {
-                                                                dict.chat
-                                                                    .generateOutputDiagram
-                                                            }
-                                                        </button>
-                                                    </div>
-                                                </>
-                                            ) : (
-                                                !showWorkspaceStageStrip && (
-                                                    <span className="rounded-full border border-white/90 bg-white/78 px-3 py-1.5 text-[11px] font-medium text-slate-600 shadow-sm">
-                                                        {resultSummary}
-                                                    </span>
+                            {showGenerateOutputSwitcher && (
+                                <div className="flex justify-end">
+                                    <div className="inline-flex rounded-full border border-white/90 bg-white/78 p-1 shadow-sm">
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                onGenerateOutputModeChange(
+                                                    "image",
                                                 )
+                                            }
+                                            className={cn(
+                                                "rounded-full px-3 py-1.5 text-[12px] font-medium transition-all",
+                                                generateOutputMode === "image"
+                                                    ? "bg-slate-900 text-white"
+                                                    : "text-slate-600 hover:text-slate-900",
                                             )}
-                                        </div>
-                                    </div>
-
-                                    <div className="flex flex-col gap-2 border-t border-white/70 pt-3 sm:flex-row sm:items-center sm:justify-between">
-                                        <p className="text-xs leading-5 text-slate-600">
-                                            {workspaceSecondaryNote}
-                                        </p>
-                                        {showGenerateOutputSwitcher &&
-                                            !showWorkspaceStageStrip && (
-                                                <span className="rounded-full border border-white/90 bg-white/78 px-3 py-1.5 text-[11px] font-medium text-slate-600 shadow-sm">
-                                                    {resultSummary}
-                                                </span>
+                                        >
+                                            {dict.chat.generateOutputImage}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                onGenerateOutputModeChange(
+                                                    "diagram",
+                                                )
+                                            }
+                                            className={cn(
+                                                "rounded-full px-3 py-1.5 text-[12px] font-medium transition-all",
+                                                generateOutputMode === "diagram"
+                                                    ? "bg-slate-900 text-white"
+                                                    : "text-slate-600 hover:text-slate-900",
                                             )}
+                                        >
+                                            {dict.chat.generateOutputDiagram}
+                                        </button>
                                     </div>
                                 </div>
-                            </div>
+                            )}
                         </div>
                     </div>
 
@@ -1016,17 +865,12 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                                 {showSourceStrip && (
                                     <div className="border-b border-slate-200/60 px-4 py-3">
-                                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                        <div className="mb-2 flex items-center justify-between gap-2">
                                             <p className="text-[11px] font-medium tracking-[0.14em] text-slate-500">
                                                 {workflowMode === "convert"
                                                     ? dict.chat.workspaceImages
                                                     : dict.chat
                                                           .workspaceSources}
-                                            </p>
-                                            <p className="text-[11px] text-slate-500">
-                                                {workflowMode === "convert"
-                                                    ? "上传内容会留在当前工作台，直接接着转图和调整。"
-                                                    : nextStep}
                                             </p>
                                         </div>
                                         <FilePreviewList
@@ -1059,10 +903,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                                                 <p className="text-sm font-medium text-foreground">
                                                     正在调用 gpt-image-2 生图
                                                 </p>
-                                                <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                                                    图片生成完成后，会直接贴到当前
-                                                    draw.io 画布上。
-                                                </p>
                                             </div>
                                         </div>
                                     ) : isReconstructing ? (
@@ -1073,9 +913,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                                             <div className="min-w-0">
                                                 <p className="text-sm font-medium text-foreground">
                                                     正在调用 Edit Banana 转图
-                                                </p>
-                                                <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                                                    识别、还原和后续调整都会继续停留在这个工作台里，不会跳到另一张页面。
                                                 </p>
                                             </div>
                                         </div>
@@ -1108,13 +945,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                                                                     workspaceGuideTitle
                                                                 }
                                                             </p>
-                                                            {workspaceGuideDescription && (
-                                                                <p className="mt-2 max-w-[620px] text-sm leading-6 text-slate-600">
-                                                                    {
-                                                                        workspaceGuideDescription
-                                                                    }
-                                                                </p>
-                                                            )}
                                                         </div>
                                                     </div>
                                                     <div className="flex flex-wrap gap-2">
@@ -1174,19 +1004,6 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
 
                                 <div className="border-t border-slate-200/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.62),rgba(248,250,252,0.96))] px-4 pb-4 pt-3">
                                     <div className="rounded-[28px] border border-white/85 bg-white/90 shadow-[0_16px_40px_rgba(15,23,42,0.06)]">
-                                        <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-4">
-                                            <p className="text-[11px] font-medium tracking-[0.14em] text-slate-500">
-                                                继续在画布上处理
-                                            </p>
-                                            <p className="text-xs text-slate-500">
-                                                {showEditEmptyState
-                                                    ? "先生成或先转图，再回来继续调整。"
-                                                    : workflowMode === "convert"
-                                                      ? "补一句要求，或直接开始转图。"
-                                                      : nextStep}
-                                            </p>
-                                        </div>
-
                                         <Textarea
                                             ref={textareaRef}
                                             value={input}
@@ -1200,7 +1017,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                                             disabled={unifiedTextareaDisabled}
                                             aria-label="Chat input"
                                             className={cn(
-                                                "w-full resize-none border-0 bg-transparent px-4 pb-3 pt-3 text-[14px] leading-6 text-slate-900 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-slate-400 scrollbar-thin",
+                                                "w-full resize-none border-0 bg-transparent px-4 pb-3 pt-4 text-[14px] leading-6 text-slate-900 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-slate-400 scrollbar-thin",
                                                 unifiedTextareaHeightClass,
                                                 unifiedTextareaDisabled &&
                                                     "opacity-60",
@@ -1466,126 +1283,25 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                             )
                         })}
                     </div>
-                    <div className="mt-3 rounded-2xl border border-border/60 bg-card px-4 py-4">
-                        <div
-                            className={cn(
-                                "flex items-start justify-between gap-3",
-                                showWorkspaceLayout && "flex-col",
-                            )}
-                        >
-                            <div>
-                                <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                                    {dict.chat.currentTaskLabel}
-                                </p>
-                                <div className="mt-1 flex flex-wrap items-center gap-2">
-                                    <p className="text-base font-semibold text-foreground">
-                                        {showPolishAction
-                                            ? dict.chat.polishTaskTitle
-                                            : modeMeta[workflowMode].title}
-                                    </p>
-                                    <span className="rounded-full border border-border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                                        {workflowMode === "generate"
-                                            ? dict.chat.stageGenerateLabel
-                                            : workflowMode === "convert"
-                                              ? dict.chat.stageConvertLabel
-                                              : dict.chat.stageEditLabel}
-                                    </span>
-                                </div>
-                            </div>
-                            <div
-                                className={cn(
-                                    "text-right",
-                                    showWorkspaceLayout &&
-                                        "w-full text-left border-t border-border/50 pt-3",
-                                )}
-                            >
-                                <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                                    {dict.chat.resultLabel}
-                                </p>
-                                <p className="mt-1 text-sm text-foreground">
-                                    {resultSummary}
-                                </p>
-                            </div>
-                        </div>
-                        <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                            {showPolishAction
-                                ? dict.chat.polishTaskHint
-                                : nextStep}
-                        </p>
-                        <div className="mt-4 flex flex-wrap gap-2">
-                            {workspaceFacts.map((fact) => (
-                                <span
-                                    key={fact}
-                                    className="rounded-full border border-border/70 bg-background px-2.5 py-1 text-xs text-muted-foreground"
+                    {showReferenceShortcuts && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                            {referenceQuickActions.map((action) => (
+                                <button
+                                    key={`${workflowMode}-${action.label}`}
+                                    type="button"
+                                    onClick={() =>
+                                        onPresetSelect(
+                                            action.text,
+                                            workflowMode,
+                                        )
+                                    }
+                                    className="rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/30 hover:bg-accent/50"
                                 >
-                                    {fact}
-                                </span>
+                                    {action.label}
+                                </button>
                             ))}
                         </div>
-                        {showReferenceShortcuts && (
-                            <div className="mt-4 rounded-xl border border-dashed border-border/70 bg-background/70 px-3 py-3">
-                                <div className="flex flex-col gap-3">
-                                    <div className="min-w-0 flex-1">
-                                        <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                                            参考起点
-                                        </p>
-                                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                                            {dict.chat.generateSourceHint}
-                                        </p>
-                                    </div>
-                                    <div className="flex flex-wrap gap-2">
-                                        {referenceQuickActions.map((action) => (
-                                            <button
-                                                key={`${workflowMode}-${action.label}`}
-                                                type="button"
-                                                onClick={() =>
-                                                    onPresetSelect(
-                                                        action.text,
-                                                        workflowMode,
-                                                    )
-                                                }
-                                                className="rounded-full border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/30 hover:bg-accent/50"
-                                            >
-                                                {action.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                        <div className="mt-4 flex flex-wrap gap-2">
-                            <Button
-                                type={showPolishAction ? "button" : "submit"}
-                                onClick={
-                                    showPolishAction ? onAutoPolish : undefined
-                                }
-                                disabled={primaryActionDisabled}
-                                size="sm"
-                                className="h-9 min-w-[128px] rounded-xl px-4 font-medium shadow-sm"
-                            >
-                                {showPolishAction ? (
-                                    <Sparkles className="mr-1.5 h-4 w-4" />
-                                ) : (
-                                    primaryActionIcon
-                                )}
-                                {showPolishAction && isAutoPolishing
-                                    ? dict.chat.polishActionRunning
-                                    : primaryActionLabel}
-                            </Button>
-                            {showPolishAction && (
-                                <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    className="h-9 rounded-xl px-4"
-                                    onClick={() => onWorkflowModeChange("edit")}
-                                    disabled={isDisabled}
-                                >
-                                    {dict.chat.polishSkipAction}
-                                </Button>
-                            )}
-                        </div>
-                    </div>
+                    )}
                 </div>
             </div>
         )
