@@ -20,7 +20,11 @@ import {
 import { flushSync } from "react-dom"
 import { Toaster, toast } from "sonner"
 import { ButtonWithTooltip } from "@/components/button-with-tooltip"
-import { ChatInput } from "@/components/chat-input"
+import {
+    ChatInput,
+    type GenerateOutputMode,
+    type WorkflowMode,
+} from "@/components/chat-input"
 import Image from "@/components/image-with-basepath"
 import { ModelConfigDialog } from "@/components/model-config-dialog"
 import { SettingsDialog } from "@/components/settings-dialog"
@@ -39,7 +43,7 @@ import { STORAGE_KEYS } from "@/lib/storage"
 import type { UrlData } from "@/lib/url-utils"
 import { type FileData, useFileProcessor } from "@/lib/use-file-processor"
 import { useQuotaManager } from "@/lib/use-quota-manager"
-import { cn, formatXML, isRealDiagram } from "@/lib/utils"
+import { appendImageToDiagram, cn, formatXML, isRealDiagram } from "@/lib/utils"
 import type { ValidationState } from "./chat/ValidationCard"
 import { ChatMessageDisplay } from "./chat-message-display"
 import { DevXmlSimulator } from "./dev-xml-simulator"
@@ -80,10 +84,41 @@ interface ChatPanelProps {
 // Constants for tool states
 const TOOL_ERROR_STATE = "output-error" as const
 const DEBUG = process.env.NODE_ENV === "development"
+const SHOW_DEV_XML_SIMULATOR = DEBUG && false
 // Increased to 3 to support VLM validation retries (matches MAX_VALIDATION_RETRIES)
 const MAX_AUTO_RETRY_COUNT = 3
 
 const MAX_CONTINUATION_RETRY_COUNT = 2 // Limit for truncation continuation retries
+const AUTO_POLISH_PROMPT =
+    "请基于当前画布自动整理布局，合并稀碎文本，统一字体、对齐、间距和分组层次，但不要改变原图语义；如果同一标签被拆成多段，请优先合并成完整文本。"
+
+function dataUrlToFile(dataUrl: string, filename: string): File {
+    const [header, content] = dataUrl.split(",")
+    const mimeType = header.match(/data:(.*?);base64/)?.[1] || "image/png"
+    const binary = atob(content || "")
+    const bytes = new Uint8Array(binary.length)
+
+    for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index)
+    }
+
+    return new File([bytes], filename, { type: mimeType })
+}
+
+function getImageDimensions(
+    dataUrl: string,
+): Promise<{ width: number; height: number }> {
+    return new Promise((resolve, reject) => {
+        const image = new window.Image()
+        image.onload = () =>
+            resolve({
+                width: image.naturalWidth || image.width || 1024,
+                height: image.naturalHeight || image.height || 1024,
+            })
+        image.onerror = () => reject(new Error("无法读取生成图片的尺寸信息"))
+        image.src = dataUrl
+    })
+}
 
 /**
  * Check if auto-resubmit should happen based on tool errors.
@@ -188,6 +223,45 @@ export default function ChatPanel({
     const [vlmValidationEnabled, setVlmValidationEnabled] = useState(false)
     const [customSystemMessage, setCustomSystemMessage] = useState("")
     const [shouldFocusInput, setShouldFocusInput] = useState(false)
+    const [isReconstructing, setIsReconstructing] = useState(false)
+    const [isGeneratingImage, setIsGeneratingImage] = useState(false)
+    const [workflowMode, setWorkflowMode] = useState<WorkflowMode>("generate")
+    const [generateOutputMode, setGenerateOutputMode] =
+        useState<GenerateOutputMode>("image")
+    const [needsPolish, setNeedsPolish] = useState(false)
+    const [isAutoPolishing, setIsAutoPolishing] = useState(false)
+    const [autoPolishPending, setAutoPolishPending] = useState(false)
+    const previousStatusRef = useRef<
+        "submitted" | "streaming" | "ready" | "error"
+    >("ready")
+
+    useEffect(() => {
+        const hasImageFiles = files.some((file) =>
+            file.type.startsWith("image/"),
+        )
+        const hasDiagram = isRealDiagram(chartXML)
+
+        if (!hasDiagram && hasImageFiles && workflowMode !== "convert") {
+            setWorkflowMode("convert")
+            return
+        }
+
+        if (!hasImageFiles && !hasDiagram && workflowMode !== "generate") {
+            setWorkflowMode("generate")
+            return
+        }
+
+        if (hasDiagram && !hasImageFiles && workflowMode === "convert") {
+            setWorkflowMode("edit")
+        }
+    }, [files, chartXML, workflowMode])
+
+    useEffect(() => {
+        if (!isRealDiagram(chartXML)) {
+            setNeedsPolish(false)
+            setAutoPolishPending(false)
+        }
+    }, [chartXML])
 
     // Restore input from sessionStorage on mount (when ChatPanel remounts due to key change)
     useEffect(() => {
@@ -543,6 +617,20 @@ export default function ChatPanel({
         sendMessageRef.current = sendMessage
     }, [sendMessage])
 
+    useEffect(() => {
+        const previousStatus = previousStatusRef.current
+        const hasFinishedStreaming =
+            (previousStatus === "submitted" ||
+                previousStatus === "streaming") &&
+            (status === "ready" || status === "error")
+
+        if (isAutoPolishing && hasFinishedStreaming) {
+            setIsAutoPolishing(false)
+        }
+
+        previousStatusRef.current = status
+    }, [status, isAutoPolishing])
+
     // Ref to track latest messages for unload persistence
     const messagesRef = useRef(messages)
     useEffect(() => {
@@ -579,11 +667,13 @@ export default function ChatPanel({
                 if (hasRealDiagram) {
                     onDisplayChart(data.diagramXml, true)
                     chartXMLRef.current = data.diagramXml
+                    setWorkflowMode("edit")
                 } else {
                     clearDiagram()
                     // Clear refs to prevent stale data from being saved
                     chartXMLRef.current = ""
                     latestSvgRef.current = ""
+                    setWorkflowMode("generate")
                 }
                 setDiagramHistory(data.diagramHistory || [])
             } else {
@@ -595,9 +685,16 @@ export default function ChatPanel({
                 chartXMLRef.current = ""
                 latestSvgRef.current = ""
                 setDiagramHistory([])
+                setWorkflowMode("generate")
             }
         },
-        [setMessages, onDisplayChart, clearDiagram, setDiagramHistory],
+        [
+            setMessages,
+            onDisplayChart,
+            clearDiagram,
+            setDiagramHistory,
+            setWorkflowMode,
+        ],
     )
 
     // Helper: Build session data object for saving (eliminates duplication)
@@ -810,105 +907,25 @@ export default function ChatPanel({
             )
     }, [sessionManager, buildSessionData])
 
-    const onFormSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-        e.preventDefault()
-        const isProcessing = status === "streaming" || status === "submitted"
-        if (input.trim() && !isProcessing) {
-            // Check if input matches a cached example (only when no messages yet)
-            if (messages.length === 0) {
-                const cached = findCachedResponse(
-                    input.trim(),
-                    files.length > 0,
-                )
-                if (cached) {
-                    // Add user message and fake assistant response to messages
-                    // The chat-message-display useEffect will handle displaying the diagram
-                    const toolCallId = `cached-${Date.now()}`
+    const buildWorkflowPrompt = useCallback(
+        (rawInput: string, mode: WorkflowMode = workflowMode) => {
+            const trimmed = rawInput.trim()
 
-                    // Build user message text including any file content
-                    const userText = await processFilesAndAppendContent(
-                        input,
-                        files,
-                        pdfData,
-                        undefined,
-                        urlData,
-                    )
-
-                    setMessages([
-                        {
-                            id: `user-${Date.now()}`,
-                            role: "user" as const,
-                            parts: [{ type: "text" as const, text: userText }],
-                        },
-                        {
-                            id: `assistant-${Date.now()}`,
-                            role: "assistant" as const,
-                            parts: [
-                                {
-                                    type: "tool-display_diagram" as const,
-                                    toolCallId,
-                                    state: "output-available" as const,
-                                    input: { xml: cached.xml },
-                                    output: "Successfully displayed the diagram.",
-                                },
-                            ],
-                        },
-                    ] as any)
-                    setInput("")
-                    sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
-                    setFiles([])
-                    setUrlData(new Map())
-                    return
+            if (mode === "edit") {
+                if (!trimmed) {
+                    return "请基于当前画布继续调整，保持现有结构，只修改我接下来描述的部分。"
                 }
+                return `请基于当前画布继续调整，保持现有结构，只修改我指定的部分：\n${trimmed}`
             }
 
-            try {
-                let chartXml = await onFetchChart()
-                chartXml = formatXML(chartXml)
-
-                // Update ref directly to avoid race condition with React's async state update
-                // This ensures edit_diagram has the correct XML before AI responds
-                chartXMLRef.current = chartXml
-
-                // Build user text by concatenating input with pre-extracted text
-                // (Backend only reads first text part, so we must combine them)
-                const parts: any[] = []
-                const userText = await processFilesAndAppendContent(
-                    input,
-                    files,
-                    pdfData,
-                    parts,
-                    urlData,
-                )
-
-                // Add the combined text as the first part
-                parts.unshift({ type: "text", text: userText })
-
-                // Get previous XML from the last snapshot (before this message)
-                const snapshotKeys = Array.from(
-                    xmlSnapshotsRef.current.keys(),
-                ).sort((a, b) => b - a)
-                const previousXml =
-                    snapshotKeys.length > 0
-                        ? xmlSnapshotsRef.current.get(snapshotKeys[0]) || ""
-                        : ""
-
-                // Save XML snapshot for this message (will be at index = current messages.length)
-                const messageIndex = messages.length
-                xmlSnapshotsRef.current.set(messageIndex, chartXml)
-
-                sendChatMessage(parts, chartXml, previousXml, sessionId)
-
-                // Token count is tracked in onFinish with actual server usage
-                setInput("")
-                sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
-                setFiles([])
-                setUrlData(new Map())
-            } catch (error) {
-                console.error("Error fetching chart data:", error)
+            if (mode === "generate") {
+                return trimmed
             }
-        }
-    }
+
+            return trimmed
+        },
+        [workflowMode],
+    )
 
     // Handle session switching from history dropdown
     const handleSelectSession = useCallback(
@@ -979,6 +996,10 @@ export default function ChatPanel({
         setMessages([])
         setInput("")
         clearDiagram()
+        setWorkflowMode("generate")
+        setNeedsPolish(false)
+        setIsAutoPolishing(false)
+        setAutoPolishPending(false)
         setDiagramHistory([])
         setValidationStates({}) // Clear validation states to prevent memory leak
         handleFileChange([]) // Use handleFileChange to also clear pdfData
@@ -1016,6 +1037,18 @@ export default function ChatPanel({
         saveInputToSessionStorage(e.target.value)
         setInput(e.target.value)
     }
+
+    const handlePresetSelect = useCallback(
+        (text: string, mode?: WorkflowMode) => {
+            if (mode) {
+                setWorkflowMode(mode)
+            }
+            setInput(text)
+            saveInputToSessionStorage(text)
+            setShouldFocusInput(true)
+        },
+        [],
+    )
 
     const saveInputToSessionStorage = (input: string) => {
         sessionStorage.setItem(SESSION_STORAGE_INPUT_KEY, input)
@@ -1178,6 +1211,430 @@ export default function ChatPanel({
         return userText
     }
 
+    const reconstructImageToDiagram = useCallback(
+        async ({
+            targetFile,
+            sourceText,
+            appendUserMessage = true,
+        }: {
+            targetFile: File
+            sourceText: string
+            appendUserMessage?: boolean
+        }) => {
+            setIsReconstructing(true)
+
+            try {
+                const formData = new FormData()
+                formData.append("file", targetFile, targetFile.name)
+
+                const response = await fetch(
+                    getApiEndpoint("/api/edit-banana/convert"),
+                    {
+                        method: "POST",
+                        body: formData,
+                    },
+                )
+                const data = await response.json()
+
+                if (!response.ok || !data?.success || !data?.xml) {
+                    throw new Error(data?.message || "Edit Banana 重建失败")
+                }
+
+                const xml = formatXML(data.xml)
+                onDisplayChart(xml, true)
+                chartXMLRef.current = xml
+
+                const now = Date.now()
+                setMessages(
+                    (current) =>
+                        [
+                            ...current,
+                            ...(appendUserMessage
+                                ? [
+                                      {
+                                          id: `user-${now}`,
+                                          role: "user" as const,
+                                          parts: [
+                                              {
+                                                  type: "text" as const,
+                                                  text: sourceText,
+                                              },
+                                          ],
+                                      },
+                                  ]
+                                : []),
+                            {
+                                id: `assistant-${now}`,
+                                role: "assistant" as const,
+                                parts: [
+                                    {
+                                        type: "tool-display_diagram" as const,
+                                        toolCallId: `edit-banana-${now}`,
+                                        state: "output-available" as const,
+                                        input: { xml },
+                                        output: "Edit Banana reconstructed the diagram.",
+                                    },
+                                ],
+                            },
+                        ] as any,
+                )
+
+                setFiles([])
+                setUrlData(new Map())
+                setInput("")
+                setWorkflowMode("edit")
+                setNeedsPolish(true)
+                setAutoPolishPending(true)
+                sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
+                if (data.mode === "fallback_text_overlay") {
+                    toast.success(
+                        "已生成可编辑页面，当前为图片底图 + OCR 文本覆盖层模式",
+                    )
+                } else {
+                    toast.success("Edit Banana 重建完成")
+                }
+            } catch (error) {
+                console.error("Edit Banana reconstruction failed:", error)
+
+                toast.error(
+                    error instanceof Error
+                        ? error.message
+                        : "Edit Banana 重建失败",
+                )
+            } finally {
+                setIsReconstructing(false)
+            }
+        },
+        [onDisplayChart, setMessages, setFiles, setInput],
+    )
+
+    const handleReconstructWithEditBanana = useCallback(async () => {
+        const imageFiles = files.filter((file) =>
+            file.type.startsWith("image/"),
+        )
+        if (imageFiles.length === 0) {
+            toast.error("请先上传图片文件")
+            return
+        }
+
+        await reconstructImageToDiagram({
+            targetFile: imageFiles[0],
+            sourceText: `请将图片 ${imageFiles[0].name} 重建为可编辑 draw.io 图`,
+        })
+    }, [files, reconstructImageToDiagram])
+
+    const handleGenerateImageWithSasu = useCallback(
+        async (prompt: string) => {
+            const trimmedPrompt = prompt.trim()
+            if (!trimmedPrompt) return
+
+            setIsGeneratingImage(true)
+
+            const now = Date.now()
+            setMessages(
+                (current) =>
+                    [
+                        ...current,
+                        {
+                            id: `user-${now}`,
+                            role: "user" as const,
+                            parts: [
+                                { type: "text" as const, text: trimmedPrompt },
+                            ],
+                        },
+                    ] as any,
+            )
+
+            try {
+                const response = await fetch(
+                    getApiEndpoint("/api/generate-image"),
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify({
+                            prompt: trimmedPrompt,
+                        }),
+                    },
+                )
+                const data = await response.json()
+
+                if (!response.ok || !data?.success || !data?.imageDataUrl) {
+                    throw new Error(data?.message || "图片生成失败")
+                }
+                const generatedFile = dataUrlToFile(
+                    data.imageDataUrl,
+                    `sasu-image2-${now}.png`,
+                )
+                const dimensions = await getImageDimensions(data.imageDataUrl)
+                const nextXml = appendImageToDiagram(
+                    chartXMLRef.current,
+                    data.imageDataUrl,
+                    dimensions.width,
+                    dimensions.height,
+                )
+
+                setInput("")
+                setUrlData(new Map())
+                sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
+
+                onDisplayChart(nextXml, true)
+                chartXMLRef.current = nextXml
+
+                setMessages(
+                    (current) =>
+                        [
+                            ...current,
+                            {
+                                id: `assistant-${now}`,
+                                role: "assistant" as const,
+                                parts: [
+                                    {
+                                        type: "text" as const,
+                                        text: "已完成生图，并直接贴到 draw.io 画布上。",
+                                    },
+                                    {
+                                        type: "file" as const,
+                                        url: data.imageDataUrl,
+                                        mediaType: generatedFile.type,
+                                    },
+                                    {
+                                        type: "tool-display_diagram" as const,
+                                        toolCallId: `generated-image-${now}`,
+                                        state: "output-available" as const,
+                                        input: { xml: nextXml },
+                                        output: "Generated image placed on draw.io canvas.",
+                                    },
+                                ],
+                            },
+                        ] as any,
+                )
+
+                setFiles([])
+                setWorkflowMode("edit")
+                setNeedsPolish(false)
+                setAutoPolishPending(false)
+                toast.success("图片已生成，并贴到 draw.io 画布上")
+            } catch (error) {
+                console.error("SASU image generation failed:", error)
+                toast.error(
+                    error instanceof Error ? error.message : "图片生成失败",
+                )
+            } finally {
+                setIsGeneratingImage(false)
+            }
+        },
+        [reconstructImageToDiagram, setMessages, setInput],
+    )
+
+    const submitWorkflowPrompt = useCallback(
+        async ({
+            prompt,
+            mode = workflowMode,
+            skipCache = false,
+            clearComposer = true,
+            clearAttachments = true,
+        }: {
+            prompt: string
+            mode?: WorkflowMode
+            skipCache?: boolean
+            clearComposer?: boolean
+            clearAttachments?: boolean
+        }) => {
+            const trimmedPrompt = prompt.trim()
+            const isProcessing =
+                status === "streaming" ||
+                status === "submitted" ||
+                isGeneratingImage ||
+                isReconstructing
+
+            if (isProcessing) {
+                return
+            }
+
+            if (mode === "convert") {
+                await handleReconstructWithEditBanana()
+                return
+            }
+
+            if (!trimmedPrompt) {
+                return
+            }
+
+            if (mode === "generate" && generateOutputMode === "image") {
+                await handleGenerateImageWithSasu(trimmedPrompt)
+                return
+            }
+
+            const workflowPrompt = buildWorkflowPrompt(trimmedPrompt, mode)
+
+            if (!skipCache && messages.length === 0) {
+                const cached = findCachedResponse(
+                    trimmedPrompt,
+                    files.length > 0,
+                )
+                if (cached) {
+                    const toolCallId = `cached-${Date.now()}`
+                    const userText = await processFilesAndAppendContent(
+                        workflowPrompt,
+                        files,
+                        pdfData,
+                        undefined,
+                        urlData,
+                    )
+
+                    setMessages([
+                        {
+                            id: `user-${Date.now()}`,
+                            role: "user" as const,
+                            parts: [{ type: "text" as const, text: userText }],
+                        },
+                        {
+                            id: `assistant-${Date.now()}`,
+                            role: "assistant" as const,
+                            parts: [
+                                {
+                                    type: "tool-display_diagram" as const,
+                                    toolCallId,
+                                    state: "output-available" as const,
+                                    input: { xml: cached.xml },
+                                    output: "Successfully displayed the diagram.",
+                                },
+                            ],
+                        },
+                    ] as any)
+
+                    if (clearComposer) {
+                        setInput("")
+                        sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
+                    }
+                    if (clearAttachments) {
+                        setFiles([])
+                        setUrlData(new Map())
+                    }
+                    if (mode === "edit") {
+                        setNeedsPolish(false)
+                    }
+                    return
+                }
+            }
+
+            try {
+                let chartXml = await onFetchChart()
+                chartXml = formatXML(chartXml)
+                chartXMLRef.current = chartXml
+
+                const parts: any[] = []
+                const userText = await processFilesAndAppendContent(
+                    workflowPrompt,
+                    files,
+                    pdfData,
+                    parts,
+                    urlData,
+                )
+                parts.unshift({ type: "text", text: userText })
+
+                const snapshotKeys = Array.from(
+                    xmlSnapshotsRef.current.keys(),
+                ).sort((a, b) => b - a)
+                const previousXml =
+                    snapshotKeys.length > 0
+                        ? xmlSnapshotsRef.current.get(snapshotKeys[0]) || ""
+                        : ""
+
+                const messageIndex = messages.length
+                xmlSnapshotsRef.current.set(messageIndex, chartXml)
+
+                sendChatMessage(parts, chartXml, previousXml, sessionId)
+
+                if (clearComposer) {
+                    setInput("")
+                    sessionStorage.removeItem(SESSION_STORAGE_INPUT_KEY)
+                }
+                if (clearAttachments) {
+                    setFiles([])
+                    setUrlData(new Map())
+                }
+                if (mode === "edit") {
+                    setNeedsPolish(false)
+                }
+            } catch (error) {
+                console.error("Error fetching chart data:", error)
+                if (mode === "edit") {
+                    setIsAutoPolishing(false)
+                }
+            }
+        },
+        [
+            workflowMode,
+            status,
+            handleReconstructWithEditBanana,
+            handleGenerateImageWithSasu,
+            generateOutputMode,
+            isGeneratingImage,
+            isReconstructing,
+            buildWorkflowPrompt,
+            messages.length,
+            files,
+            pdfData,
+            urlData,
+            onFetchChart,
+            sessionId,
+            setMessages,
+            setFiles,
+        ],
+    )
+
+    const onFormSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+        e.preventDefault()
+        const shouldConvert = workflowMode === "convert"
+        const canSubmit = shouldConvert
+            ? files.some((file) => file.type.startsWith("image/"))
+            : Boolean(input.trim())
+
+        if (!canSubmit) {
+            return
+        }
+
+        await submitWorkflowPrompt({
+            prompt: input,
+            mode: workflowMode,
+        })
+    }
+
+    const handleAutoPolish = useCallback(async () => {
+        if (!isRealDiagram(chartXMLRef.current)) {
+            toast.error("当前还没有可整理的图")
+            return
+        }
+
+        setWorkflowMode("edit")
+        setNeedsPolish(false)
+        setAutoPolishPending(false)
+        setIsAutoPolishing(true)
+
+        await submitWorkflowPrompt({
+            prompt: AUTO_POLISH_PROMPT,
+            mode: "edit",
+            skipCache: true,
+            clearComposer: true,
+            clearAttachments: true,
+        })
+    }, [submitWorkflowPrompt])
+
+    useEffect(() => {
+        if (!autoPolishPending || isAutoPolishing) {
+            return
+        }
+
+        if (!isRealDiagram(chartXML)) {
+            return
+        }
+
+        void handleAutoPolish()
+    }, [autoPolishPending, isAutoPolishing, chartXML, handleAutoPolish])
+
     const handleRegenerate = async (messageIndex: number) => {
         const isProcessing = status === "streaming" || status === "submitted"
         if (isProcessing) return
@@ -1274,7 +1731,7 @@ export default function ChatPanel({
     // Collapsed view (desktop only)
     if (!isVisible && !isMobile) {
         return (
-            <div className="h-full flex flex-col items-center pt-4 bg-card border border-border/30 rounded-xl">
+            <div className="h-full flex flex-col items-center pt-4 bg-background/95 border-l border-border/40">
                 <ButtonWithTooltip
                     tooltipContent={dict.nav.showPanel}
                     variant="ghost"
@@ -1296,11 +1753,32 @@ export default function ChatPanel({
         )
     }
 
+    const workspaceConversation =
+        messages.length > 0 ? (
+            <div className="h-full min-h-[320px] bg-transparent">
+                <ChatMessageDisplay
+                    messages={messages}
+                    setInput={setInput}
+                    setFiles={handleFileChange}
+                    processedToolCallsRef={processedToolCallsRef}
+                    editDiagramOriginalXmlRef={editDiagramOriginalXmlRef}
+                    sessionId={sessionId}
+                    onRegenerate={handleRegenerate}
+                    status={status}
+                    onEditMessage={handleEditMessage}
+                    loadedMessageIdsRef={loadedMessageIdsRef}
+                    validationStates={validationStates}
+                    onImproveWithSuggestions={handleImproveWithSuggestions}
+                    variant="workspace"
+                />
+            </div>
+        ) : null
+
     // Full view
     return (
         <div
             className={cn(
-                "h-full flex flex-col bg-card shadow-soft rounded-xl border border-border/30 relative",
+                "h-full flex flex-col bg-background/95 border-l border-border/40 relative",
                 shouldAnimatePanel && "animate-slide-in-right",
             )}
         >
@@ -1317,7 +1795,7 @@ export default function ChatPanel({
             />
             {/* Header */}
             <header
-                className={`${isMobile ? "px-3 py-2" : "px-5 py-4"} border-b border-border/50`}
+                className={`${isMobile ? "px-3 py-2" : "px-4 py-3"} border-b border-border/40 bg-background/90`}
             >
                 <div className="flex items-center justify-between">
                     <button
@@ -1342,7 +1820,7 @@ export default function ChatPanel({
                                 className="rounded flex-shrink-0"
                             />
                             <h1
-                                className={`${isMobile ? "text-sm" : "text-base"} font-semibold tracking-tight whitespace-nowrap`}
+                                className={`${isMobile ? "text-sm" : "text-[15px]"} font-semibold tracking-tight whitespace-nowrap`}
                             >
                                 Next AI Drawio
                             </h1>
@@ -1396,28 +1874,51 @@ export default function ChatPanel({
 
             {/* Messages */}
             <main className="flex-1 w-full overflow-hidden">
-                <ChatMessageDisplay
-                    messages={messages}
-                    setInput={setInput}
-                    setFiles={handleFileChange}
-                    processedToolCallsRef={processedToolCallsRef}
-                    editDiagramOriginalXmlRef={editDiagramOriginalXmlRef}
-                    sessionId={sessionId}
-                    onRegenerate={handleRegenerate}
-                    status={status}
-                    onEditMessage={handleEditMessage}
-                    isRestored={isRestored}
-                    sessions={sessionManager.sessions}
-                    onSelectSession={handleSelectSession}
-                    onDeleteSession={handleDeleteSession}
-                    loadedMessageIdsRef={loadedMessageIdsRef}
-                    validationStates={validationStates}
-                    onImproveWithSuggestions={handleImproveWithSuggestions}
-                />
+                <div className="h-full overflow-hidden px-2 py-2">
+                    <ChatInput
+                        input={input}
+                        status={status}
+                        onSubmit={onFormSubmit}
+                        onChange={handleInputChange}
+                        onStop={handleStop}
+                        files={files}
+                        onFileChange={handleFileChange}
+                        pdfData={pdfData}
+                        urlData={urlData}
+                        onUrlChange={setUrlData}
+                        sessionId={sessionId}
+                        error={error}
+                        models={modelConfig.models}
+                        selectedModelId={modelConfig.selectedModelId}
+                        onModelSelect={modelConfig.setSelectedModelId}
+                        onConfigureModels={() => setShowModelConfigDialog(true)}
+                        showUnvalidatedModels={
+                            modelConfig.showUnvalidatedModels
+                        }
+                        shouldFocus={shouldFocusInput}
+                        onFocused={() => setShouldFocusInput(false)}
+                        isReconstructing={isReconstructing}
+                        isGeneratingImage={isGeneratingImage}
+                        workflowMode={workflowMode}
+                        onWorkflowModeChange={setWorkflowMode}
+                        generateOutputMode={generateOutputMode}
+                        onGenerateOutputModeChange={setGenerateOutputMode}
+                        hasDiagram={isRealDiagram(chartXML)}
+                        onPresetSelect={handlePresetSelect}
+                        needsPolish={needsPolish}
+                        isAutoPolishing={isAutoPolishing}
+                        onAutoPolish={handleAutoPolish}
+                        layout="workspace"
+                        sessions={sessionManager.sessions}
+                        onSelectSession={handleSelectSession}
+                        onDeleteSession={handleDeleteSession}
+                        workspaceConversation={workspaceConversation}
+                    />
+                </div>
             </main>
 
             {/* Dev XML Streaming Simulator - only in development */}
-            {DEBUG && (
+            {SHOW_DEV_XML_SIMULATOR && (
                 <DevXmlSimulator
                     setMessages={setMessages}
                     onDisplayChart={onDisplayChart}
@@ -1426,33 +1927,6 @@ export default function ChatPanel({
                     }
                 />
             )}
-
-            {/* Input */}
-            <footer
-                className={`${isMobile ? "p-2" : "p-4"} border-t border-border/50 bg-card/50`}
-            >
-                <ChatInput
-                    input={input}
-                    status={status}
-                    onSubmit={onFormSubmit}
-                    onChange={handleInputChange}
-                    onStop={handleStop}
-                    files={files}
-                    onFileChange={handleFileChange}
-                    pdfData={pdfData}
-                    urlData={urlData}
-                    onUrlChange={setUrlData}
-                    sessionId={sessionId}
-                    error={error}
-                    models={modelConfig.models}
-                    selectedModelId={modelConfig.selectedModelId}
-                    onModelSelect={modelConfig.setSelectedModelId}
-                    onConfigureModels={() => setShowModelConfigDialog(true)}
-                    showUnvalidatedModels={modelConfig.showUnvalidatedModels}
-                    shouldFocus={shouldFocusInput}
-                    onFocused={() => setShouldFocusInput(false)}
-                />
-            </footer>
 
             <SettingsDialog
                 open={showSettingsDialog}
